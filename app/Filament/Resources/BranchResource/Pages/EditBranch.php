@@ -10,10 +10,9 @@ class EditBranch extends EditRecord
 {
     protected static string $resource = BranchResource::class;
 
-    protected function getHeaderActions(): array
+    public function getTitle(): string
     {
-        return [
-            Actions\DeleteAction::make(),
-        ];
+        return __('Edit :label', ['label' => __('branch')]);
     }
 }
+

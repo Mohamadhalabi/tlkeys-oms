@@ -22,20 +22,11 @@ Route::post('/imports/products', ProductImportController::class)->name('imports.
 
 
 
+
 Route::get('/admin/set-locale/{locale}', function (string $locale) {
-    $allowed = ['en','ar','tr','fr','es','de','ru']; // add/remove as you like
-    abort_unless(in_array($locale, $allowed, true), 404);
-
-    // Remember in session
-    session(['locale' => $locale]);
-
-    // Persist on user too (optional, so they keep their choice after logout)
-    if (auth()->check()) {
-        auth()->user()->forceFill(['locale' => $locale])->save();
-    }
-
-    // Go back to the previous page
+    abort_unless(in_array($locale, ['en', 'ar'], true), 404);
+    session(['locale' => $locale]);   // middleware will read this on next request
     return back();
-})->middleware(['web','auth'])->name('admin.set-locale');
+})->middleware(['web', 'auth'])->name('admin.set-locale');
 
 require __DIR__.'/auth.php';

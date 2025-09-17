@@ -6,107 +6,105 @@ use App\Filament\Resources\ProductResource\Pages;
 use App\Models\Product;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Forms\Components\FileUpload;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Tabs;
+use Filament\Forms\Components\Tabs\Tab;
+use Filament\Forms\Components\TextInput;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
-
-use Filament\Forms\Components\TextInput;
-use Filament\Forms\Components\Textarea;
-use Filament\Forms\Components\Repeater;
-use Filament\Forms\Components\Select;
-use Filament\Forms\Components\FileUpload;
-use Filament\Forms\Components\Tabs;
-use Filament\Forms\Components\Tabs\Tab;
-
 use Illuminate\Database\Eloquent\Builder;
 
 class ProductResource extends Resource
 {
     protected static ?string $model = Product::class;
     protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
-    protected static ?string $navigationLabel = 'Products';
 
-    // pick your locales once here
+    public static function getNavigationLabel(): string { return __('Products'); }
+    public static function getModelLabel(): string { return __('product'); }
+    public static function getPluralModelLabel(): string { return __('Products'); }
+
+    // locales you want to edit
     protected static array $locales = ['en' => 'English', 'ar' => 'العربية'];
 
     public static function form(Form $form): Form
     {
+        // Build language tabs
         $localeTabs = [];
         foreach (self::$locales as $code => $label) {
             $localeTabs[] = Tab::make($label)->schema([
-                // Use state paths like title.en (Spatie will store as JSON)
                 TextInput::make("title.$code")
-                    ->label('Title')
-                    ->required($code === 'en') // make one locale required if you want
+                    ->label(__('Title'))
+                    ->required($code === 'en')
                     ->maxLength(255),
             ]);
         }
 
         return $form->schema([
             TextInput::make('sku')
-                ->label('SKU')
+                ->label(__('SKU'))
                 ->required()
                 ->maxLength(255)
                 ->unique(ignoreRecord: true),
 
-            // 🔹 Language tabs (pure Filament)
             Tabs::make('Translations')
                 ->tabs($localeTabs)
                 ->columnSpanFull(),
 
-            TextInput::make('price')->numeric()->required()->default(0.00)->prefix('$'),
-            TextInput::make('sale_price')->numeric()->prefix('$'),
-            TextInput::make('weight')->numeric()->suffix('kg'),
+            TextInput::make('price')->label(__('Price'))->numeric()->required()->default(0.00)->prefix('$'),
+            TextInput::make('sale_price')->label(__('Sale price'))->numeric()->prefix('$'),
+            TextInput::make('weight')->label(__('Weight'))->numeric()->suffix('kg'),
 
             FileUpload::make('image')
-                ->label('Image')
+                ->label(__('Image'))
                 ->image()
                 ->directory('products')
                 ->visibility('public')
                 ->imageEditor(),
 
-            // per-branch stock
             Repeater::make('inventories')
-                ->label('Inventories (per branch)')
+                ->label(__('Inventories (per branch)'))
                 ->relationship('inventories')
                 ->schema([
                     Select::make('branch_id')
-                        ->label('Branch')
+                        ->label(__('Branch'))
                         ->relationship('branch', 'name')
                         ->searchable()
                         ->preload()
                         ->required()
                         ->disabledOn('edit'),
 
-                    TextInput::make('stock')->numeric()->required()->default(0),
-                    TextInput::make('stock_alert')->label('Alert at')->numeric()->default(0),
+                    TextInput::make('stock')->label(__('Stock'))->numeric()->required()->default(0),
+                    TextInput::make('stock_alert')->label(__('Alert at'))->numeric()->default(0),
                 ])
                 ->columns(3)
                 ->collapsible()
                 ->reorderable(false)
                 ->grid(1)
-                ->addActionLabel('Add branch stock'),
+                ->addActionLabel(__('Add branch stock')),
         ])->columns(2);
     }
 
     public static function table(Table $table): Table
     {
         return $table->columns([
-            Tables\Columns\ImageColumn::make('image')->label('Image')->square(),
-            Tables\Columns\TextColumn::make('sku')->label('SKU')->searchable()->sortable(),
+            Tables\Columns\ImageColumn::make('image')->label(__('Image'))->square(),
+            Tables\Columns\TextColumn::make('sku')->label(__('SKU'))->searchable()->sortable(),
 
-            // read current locale from JSON
+            // Show the current locale's title from JSON
             Tables\Columns\TextColumn::make('title')
-                ->label('Title')
+                ->label(__('Title'))
                 ->state(fn (Product $r) => $r->getTranslation('title', app()->getLocale() ?: 'en'))
                 ->searchable(query: function (Builder $q, string $search): Builder {
                     return $q->whereRaw("JSON_SEARCH(JSON_EXTRACT(`title`, '$'), 'one', ?) IS NOT NULL", [$search]);
                 })
                 ->sortable(),
 
-            Tables\Columns\TextColumn::make('price')->money('usd')->sortable(),
-            Tables\Columns\TextColumn::make('sale_price')->numeric()->sortable(),
-            Tables\Columns\TextColumn::make('weight')->numeric()->sortable(),
+            Tables\Columns\TextColumn::make('price')->label(__('Price'))->money('usd')->sortable(),
+            Tables\Columns\TextColumn::make('sale_price')->label(__('Sale price'))->numeric()->sortable(),
+            Tables\Columns\TextColumn::make('weight')->label(__('Weight'))->numeric()->sortable(),
             Tables\Columns\TextColumn::make('created_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
             Tables\Columns\TextColumn::make('updated_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
         ])
@@ -114,10 +112,7 @@ class ProductResource extends Resource
         ->bulkActions([Tables\Actions\BulkActionGroup::make([Tables\Actions\DeleteBulkAction::make()])]);
     }
 
-    public static function getRelations(): array
-    {
-        return [];
-    }
+    public static function getRelations(): array { return []; }
 
     public static function getPages(): array
     {

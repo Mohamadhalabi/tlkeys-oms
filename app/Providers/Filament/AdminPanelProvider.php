@@ -13,13 +13,13 @@ use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
 use Filament\Widgets;
-
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
+use App\Http\Middleware\SetLocaleFromSession;
 
 class AdminPanelProvider extends PanelProvider
 {
@@ -35,33 +35,40 @@ class AdminPanelProvider extends PanelProvider
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
             ->pages([Pages\Dashboard::class])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
-            ->widgets([
-                Widgets\AccountWidget::class,
-                Widgets\FilamentInfoWidget::class,
-            ])
+            ->widgets([Widgets\AccountWidget::class, Widgets\FilamentInfoWidget::class])
+
+            // 🔹 Custom navigation (translated)
             ->navigationItems([
-                NavigationItem::make('Customers')
+                NavigationItem::make('customers-nav') // any key; the label is set below
+                    ->label(fn () => __('Customers'))
+                    ->group(fn () => __('Customers'))
                     ->icon('heroicon-o-users')
-                    ->group('Customers')
                     ->url(fn () => url('/admin/customers'))
                     ->isActiveWhen(fn () => request()->is('admin/customers*')),
 
-                NavigationItem::make('Import customers')
+                NavigationItem::make('import-customers-nav')
+                    ->label(fn () => __('Import customers'))
+                    ->group(fn () => __('Customers'))
                     ->icon('heroicon-o-cloud-arrow-down')
-                    ->group('Customers')
                     ->visible(fn () => auth()->user()?->hasRole('admin'))
                     ->url(fn () => url('/admin/import-customers'))
                     ->isActiveWhen(fn () => request()->is('admin/import-customers')),
             ])
+
+
+
+            // quick locale switchers
             ->userMenuItems([
                 MenuItem::make()->label('English')->url(fn () => route('admin.set-locale', ['locale' => 'en'])),
                 MenuItem::make()->label('العربية')->url(fn () => route('admin.set-locale', ['locale' => 'ar'])),
             ])
+
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,
                 StartSession::class,
                 AuthenticateSession::class,
+                SetLocaleFromSession::class,
                 ShareErrorsFromSession::class,
                 VerifyCsrfToken::class,
                 SubstituteBindings::class,
@@ -70,11 +77,11 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->authMiddleware([Authenticate::class]);
 
-        // Register the translatable plugin if present (no hard import)
+        // (optional) load translatable plugin if present
         if (class_exists(\Filament\SpatieLaravelTranslatablePlugin\SpatieLaravelTranslatablePlugin::class)) {
             $panel->plugins([
                 \Filament\SpatieLaravelTranslatablePlugin\SpatieLaravelTranslatablePlugin::make()
-                    ->defaultLocales(['en','ar','tr','fr','es','de','ru','ro','it','pl']),
+                    ->defaultLocales(['en','ar']),
             ]);
         }
 

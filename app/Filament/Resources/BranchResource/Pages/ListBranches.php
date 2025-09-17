@@ -13,7 +13,13 @@ class ListBranches extends ListRecords
     protected function getHeaderActions(): array
     {
         return [
-            Actions\CreateAction::make(),
+            Actions\CreateAction::make()
+                ->label(__('Add :label', ['label' => __('branch')])),
         ];
+    }
+
+    public function getTitle(): string
+    {
+        return __('Branches');
     }
 }

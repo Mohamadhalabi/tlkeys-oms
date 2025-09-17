@@ -9,4 +9,10 @@ use Filament\Resources\Pages\CreateRecord;
 class CreateBranch extends CreateRecord
 {
     protected static string $resource = BranchResource::class;
+
+    public function getTitle(): string
+    {
+        return __('Create :label', ['label' => __('branch')]);
+    }
 }
+

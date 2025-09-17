@@ -1,13 +1,13 @@
 <x-filament::page>
     <div class="space-y-4">
         <x-filament::button wire:click="import">
-            Start Import
+            {{ __('Start Import') }}
         </x-filament::button>
 
         <div wire:poll.2s="getProgress">
             @php($p = $this->getProgress())
             <x-filament::section>
-                <x-slot name="heading">Progress</x-slot>
+                <x-slot name="heading">{{ __('Progress') }}</x-slot>
                 <div class="text-sm">
                     Status: <strong>{{ $p['status'] ?? 'idle' }}</strong><br>
                     Created: {{ $p['created'] ?? 0 }} — Updated: {{ $p['updated'] ?? 0 }}<br>
