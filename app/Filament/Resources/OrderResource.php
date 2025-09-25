@@ -15,6 +15,8 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\HtmlString;
 use Filament\Notifications\Notification;
 
 class OrderResource extends \Filament\Resources\Resource
@@ -30,11 +32,29 @@ class OrderResource extends \Filament\Resources\Resource
 
     public static function form(Form $form): Form
     {
-        $user = Auth::user();
+        $user   = Auth::user();
+        $locale = app()->getLocale();
 
-        /**
-         * Compute totals from given pieces.
-         */
+        // Helper: get localized title from Product (works with Spatie Translatable or JSON/array or plain string)
+        $titleFor = function (Product $p, string $locale): string {
+            // Spatie\Translatable support
+            if (method_exists($p, 'getTranslation')) {
+                try {
+                    $t = $p->getTranslation('title', $locale, false);
+                    if (!empty($t)) return $t;
+                } catch (\Throwable $e) {
+                    // fall through
+                }
+            }
+            // JSON/array column
+            if (is_array($p->title ?? null)) {
+                return $p->title[$locale] ?? ($p->title['en'] ?? reset($p->title) ?? '');
+            }
+            // Fallback plain string
+            return (string) ($p->title ?? '');
+        };
+
+        // Compute totals from given pieces.
         $compute = function (array $items, float $discount, float $shipping, float $rate): array {
             $subtotal = collect($items)->sum(function ($row) {
                 $qty  = (float)($row['qty'] ?? 0);
@@ -51,9 +71,7 @@ class OrderResource extends \Filament\Resources\Resource
             ];
         };
 
-        /**
-         * Write totals from ROOT context.
-         */
+        // Write totals from ROOT context.
         $setRootTotals = function (Forms\Set $set, array $t): void {
             $set('subtotal', $t['subtotal']);
             $set('total', $t['total']);
@@ -61,15 +79,24 @@ class OrderResource extends \Filament\Resources\Resource
             $set('display_total_converted', $t['display_total_converted']);
         };
 
-        /**
-         * Write totals from inside a REPEATER ROW context (note the "../../" prefixes).
-         */
+        // Write totals from inside a REPEATER ROW context (note the "../../" prefixes).
         $setNestedTotals = function (Forms\Set $set, array $t): void {
             $set('../../subtotal', $t['subtotal']);
             $set('../../total', $t['total']);
             $set('../../display_subtotal_converted', $t['display_subtotal_converted']);
             $set('../../display_total_converted', $t['display_total_converted']);
         };
+
+        // Tiny inline SVG fallback (works with no assets)
+        $fallbackImg = 'data:image/svg+xml;utf8,' . rawurlencode(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60">
+               <rect width="100%" height="100%" fill="#f3f4f6"/>
+               <g fill="#9ca3af">
+                 <rect x="12" y="18" width="36" height="24" rx="3"/>
+                 <circle cx="30" cy="30" r="6"/>
+               </g>
+             </svg>'
+        );
 
         return $form->schema([
             Forms\Components\Section::make(__('Order Info'))
@@ -114,22 +141,70 @@ class OrderResource extends \Filament\Resources\Resource
                         ->label(__('Items'))
                         ->addActionLabel(__('Add item'))
                         ->relationship()
-                        ->columns(5)
-                        ->live() // ensure nested field changes bubble up immediately
+                        ->columns(12)
+                        ->live(debounce: 300)
                         ->schema([
+                            // Product image (with default)
+                            Forms\Components\Placeholder::make('product_image')
+                                ->label('')
+                                ->content(function (Forms\Get $get) use ($fallbackImg, $locale, $titleFor) {
+                                    $productId = $get('product_id');
+
+                                    $url   = $fallbackImg;
+                                    $alt   = __('Product');
+                                    if ($productId) {
+                                        $product = Product::find($productId);
+                                        if ($product) {
+                                            // alt text = localized title (fallback to SKU)
+                                            $title = trim($titleFor($product, $locale));
+                                            $alt   = $title !== '' ? $title : ($product->sku ?? __('Product'));
+
+                                            if ($product->image) {
+                                                $image = $product->image;
+                                                $url   = filter_var($image, FILTER_VALIDATE_URL)
+                                                    ? $image
+                                                    : Storage::disk('public')->url($image);
+                                            }
+                                        }
+                                    }
+
+                                    return new HtmlString(
+                                        '<img src="' . e($url) . '" alt="' . e($alt) . '" ' .
+                                        'style="width:60px;height:60px;object-fit:contain;' .
+                                        'border-radius:6px;border:1px solid #ddd;" />'
+                                    );
+                                })
+                                ->columnSpan(1)
+                                ->reactive()
+                                ->disableLabel()
+                                ->extraAttributes(['class' => 'pt-6']),
+
+                            // Product select: "SKU — Localized Title"
                             Forms\Components\Select::make('product_id')
                                 ->label(__('Product'))
-                                ->options(function (Forms\Get $get) {
+                                ->options(function (Forms\Get $get) use ($titleFor, $locale) {
                                     $chosenBranch = $get('../../branch_id');
                                     $userBranch   = auth()->user()?->branch_id;
                                     $branchId     = $chosenBranch ?: $userBranch;
 
                                     $q = Product::query();
-                                    if ($branchId) $q->forBranch($branchId);
+                                    if ($branchId && method_exists($q->getModel(), 'scopeForBranch')) {
+                                        $q->forBranch($branchId);
+                                    }
 
-                                    return $q->orderBy('sku')->pluck('sku', 'id');
+                                    return $q->orderBy('sku')->get()
+                                        ->mapWithKeys(function (Product $p) use ($titleFor, $locale) {
+                                            $title = trim($titleFor($p, $locale));
+                                            $label = trim($p->sku . ($title !== '' ? ' — ' . $title : ''));
+                                            return [$p->id => $label];
+                                        })
+                                        ->toArray();
                                 })
-                                ->searchable()->preload()->required()->reactive()
+                                ->searchable()
+                                ->preload()
+                                ->required()
+                                ->reactive()
+                                ->columnSpan(6)
                                 ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set)
                                         use ($compute, $setNestedTotals) {
 
@@ -181,12 +256,17 @@ class OrderResource extends \Filament\Resources\Resource
 
                             Forms\Components\TextInput::make('qty')
                                 ->label(__('Qty'))
-                                ->numeric()->default(1)->minValue(1)->required()
-                                ->reactive()
+                                ->numeric()
+                                ->minValue(1)
+                                ->default(1)
+                                ->inputMode('decimal')
+                                ->step('1')
+                                ->live(onBlur: true)
+                                ->columnSpan(1)
                                 ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set)
                                         use ($compute, $setNestedTotals) {
-                                    $qty   = (float)$state;
-                                    $price = (float)($get('unit_price') ?? 0);
+                                    $qty   = (float) $state;
+                                    $price = (float) ($get('unit_price') ?? 0);
                                     $set('line_total', $qty * $price);
 
                                     $items    = (array) ($get('../../items') ?? []);
@@ -199,13 +279,16 @@ class OrderResource extends \Filament\Resources\Resource
                                 }),
 
                             Forms\Components\TextInput::make('unit_price')
-                                ->label(__('Unit price (USD)'))
-                                ->numeric()->step('0.01')->required()
-                                ->reactive()
+                                ->label(__('Unit price'))
+                                ->numeric()
+                                ->step('0.01')
+                                ->inputMode('decimal')
+                                ->live(onBlur: true)
+                                ->columnSpan(1)
                                 ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set)
                                         use ($compute, $setNestedTotals) {
-                                    $qty = (float)($get('qty') ?? 1);
-                                    $set('line_total', $qty * (float)$state);
+                                    $qty = (float) ($get('qty') ?? 1);
+                                    $set('line_total', $qty * (float) $state);
 
                                     $items    = (array) ($get('../../items') ?? []);
                                     $discount = (float) ($get('../../discount') ?? 0);
@@ -217,10 +300,11 @@ class OrderResource extends \Filament\Resources\Resource
                                 }),
 
                             Forms\Components\TextInput::make('line_total')
-                                ->label(__('Line total (USD)'))
-                                ->numeric()->disabled(),
+                                ->label(__('Total'))
+                                ->numeric()
+                                ->disabled()
+                                ->columnSpan(2),
                         ])
-                        // Recalc when rows are added/removed
                         ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get)
                                 use ($compute, $setNestedTotals) {
                             $items    = (array) ($get('../../items') ?? $state ?? []);
