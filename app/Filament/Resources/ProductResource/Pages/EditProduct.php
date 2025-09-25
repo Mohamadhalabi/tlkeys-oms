@@ -8,12 +8,14 @@ use Filament\Resources\Pages\EditRecord;
 
 class EditProduct extends EditRecord
 {
-    protected static string $resource = ProductResource::class;
+    protected static string $resource = \App\Filament\Resources\ProductResource::class;
 
-    protected function getHeaderActions(): array
+    protected function mutateFormDataBeforeSave(array $data): array
     {
-        return [
-            Actions\DeleteAction::make(),
-        ];
+        if (blank($data['image'] ?? null)) {
+            unset($data['image']);  // ← keep current image value
+        }
+
+        return $data;
     }
 }

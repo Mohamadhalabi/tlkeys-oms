@@ -62,7 +62,10 @@ class ProductResource extends Resource
                 ->image()
                 ->directory('products')
                 ->visibility('public')
-                ->imageEditor(),
+                ->imageEditor()
+                ->nullable()
+                ->dehydrated(fn ($state) => filled($state)),
+
 
             Repeater::make('inventories')
                 ->label(__('Inventories (per branch)'))

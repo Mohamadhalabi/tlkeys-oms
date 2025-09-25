@@ -11,4 +11,16 @@ class Branch extends Model
     public function users() { return $this->hasMany(User::class); }
 
     public function productStocks() { return $this->hasMany(ProductBranch::class); }
+
+    public function products()
+    {
+        return $this->belongsToMany(Product::class, 'product_branch')
+            ->withPivot(['stock','stock_alert'])
+            ->withTimestamps();
+    }
+
+    public function inventories()
+    {
+        return $this->hasMany(ProductBranch::class, 'branch_id');
+    }
 }

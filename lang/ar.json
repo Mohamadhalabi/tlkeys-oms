@@ -70,5 +70,6 @@
   "No :resource": "لا توجد :resource",
 
   "Available in branch: :stock": "المتوفر في الفرع: :stock",
-  "Available in branch: :count": "المتوفر في الفرع: :count"
+  "Available in branch: :count": "المتوفر في الفرع: :count",
+  "orders.product_exists": "هذا المنتج موجود بالفعل في الطلب."
 }

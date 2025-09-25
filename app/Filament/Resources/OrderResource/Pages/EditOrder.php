@@ -49,6 +49,15 @@ class EditOrder extends EditRecord
     }
 
     /**
+     * Force seller_id to logged-in user before saving.
+     */
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        $data['seller_id'] = auth()->id();   // always assign to current user
+        return $data;
+    }
+
+    /**
      * After saving edits, make sure totals are correct.
      */
     protected function afterSave(): void

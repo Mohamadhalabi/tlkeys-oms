@@ -18,15 +18,16 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 });
 
-Route::post('/imports/products', ProductImportController::class)->name('imports.products');
-
-
-
-
 Route::get('/admin/set-locale/{locale}', function (string $locale) {
     abort_unless(in_array($locale, ['en', 'ar'], true), 404);
     session(['locale' => $locale]);   // middleware will read this on next request
     return back();
 })->middleware(['web', 'auth'])->name('admin.set-locale');
+
+
+Route::post('/admin/products/import', \App\Http\Controllers\ProductImportController::class)
+    ->middleware(['auth'])
+    ->name('products.import');
+
 
 require __DIR__.'/auth.php';

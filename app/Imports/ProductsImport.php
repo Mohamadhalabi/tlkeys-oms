@@ -2,36 +2,130 @@
 
 namespace App\Imports;
 
+use App\Models\Product;
+use App\Models\ProductBranch;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Concerns\ToCollection;
 use Maatwebsite\Excel\Concerns\WithHeadingRow;
-use Maatwebsite\Excel\Concerns\SkipsOnFailure;
-use Maatwebsite\Excel\Concerns\SkipsFailures;
-use Illuminate\Support\Collection;
+use Maatwebsite\Excel\Concerns\WithChunkReading;
+use Maatwebsite\Excel\Concerns\WithBatchInserts;
 
-class ProductsImport implements ToCollection, WithHeadingRow, SkipsOnFailure
+/**
+ * Supports:
+ * - title as JSON in one cell: {"en":"...","ar":"..."}
+ * - OR two columns: title_en, title_ar
+ * Also updates stock per selected branch.
+ */
+class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, WithBatchInserts, ShouldQueue
 {
-    use SkipsFailures;
-    public function __construct(public int $branchId) {}
+    public function __construct(private int $branchId) {}
 
+    public function collection(Collection $rows)
+    {
+        DB::transaction(function () use ($rows) {
+            foreach ($rows as $row) {
+                $sku = trim((string) ($row['sku'] ?? ''));
+                if ($sku === '') continue;
 
-    public function collection(Collection $rows) {
-        foreach ($rows as $row) {
-            $sku = trim((string)$row['sku']); if (!$sku) continue;
-            $product = Product::updateOrCreate(
-                ['sku'=>$sku],
-                [
-                    'title' => $row['title'] ?? $sku,
-                    'price' => (float)($row['price'] ?? 0),
-                    'sale_price' => filled($row['sale_price']) ? (float)$row['sale_price'] : null,
-                    'weight' => filled($row['weight']) ? (float)$row['weight'] : null,
+                // Create if missing (existing SKUs keep their fields; we only update stock)
+                $product = Product::firstOrCreate(
+                    ['sku' => $sku],
+                    [
+                        'title'      => $this->parseTitle($row),
+                        'price'      => $this->toFloat($row['price'] ?? null) ?? 0,
+                        'sale_price' => $this->toFloat($row['sale_price'] ?? null),
+                        'weight'     => $this->toFloat($row['weight'] ?? null),
+                        'image'      => (string) ($row['image'] ?? null),
                     ]
                 );
 
-                $stock = (int)($row['stock'] ?? 0);
-                $alert = (int)($row['stock_alert'] ?? 0);
-                $product->branches()->syncWithoutDetaching([
-                    $this->branchId => ['stock'=>$stock, 'stock_alert'=>$alert],
-                ]);
+                ProductBranch::updateOrCreate(
+                    ['product_id' => $product->id, 'branch_id' => $this->branchId],
+                    [
+                        'stock'       => (int) ($row['stock'] ?? 0),
+                        'stock_alert' => (int) ($row['stock_alert'] ?? 0),
+                    ]
+                );
+            }
+        });
+    }
+
+    /** Build translations:
+     * 1) Try title_en/title_ar
+     * 2) Else try to decode JSON from "title" (even if double-encoded or with curly quotes)
+     * 3) Else use plain string for both
+     */
+    private function parseTitle(array $row): array
+    {
+        $en = (string) ($row['title_en'] ?? '');
+        $ar = (string) ($row['title_ar'] ?? '');
+
+        $raw = isset($row['title']) ? (string) $row['title'] : '';
+
+        if ($en === '' && $ar === '' && $raw !== '') {
+            // Try several ways to decode the JSON-like string
+            foreach ($this->titleCandidates($raw) as $cand) {
+                $decoded = $this->deepJsonDecode($cand);
+                if (is_array($decoded)) {
+                    $en = (string) ($decoded['en'] ?? $decoded['EN'] ?? $en);
+                    $ar = (string) ($decoded['ar'] ?? $decoded['AR'] ?? $ar);
+                    if ($en !== '' || $ar !== '') break;
+                }
             }
         }
+
+        if ($en === '' && $ar === '') {
+            $en = $raw;
+            $ar = $raw;
+        }
+
+        return ['en' => $en, 'ar' => $ar !== '' ? $ar : $en];
+    }
+
+    // Try multiple cleaned variants of the string
+    private function titleCandidates(string $s): array
+    {
+        $curlyOpen  = "\xE2\x80\x9C"; // “
+        $curlyClose = "\xE2\x80\x9D"; // ”
+        $s1 = str_replace([$curlyOpen, $curlyClose], '"', $s);
+
+        return array_unique(array_filter([
+            trim($s1),
+            trim($s1, "\"'"),
+            stripslashes($s1),
+            stripslashes(trim($s1, "\"'")),
+            html_entity_decode($s1, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'),
+        ]));
+    }
+
+    // Decode up to 3 times in case the cell contains a JSON-encoded JSON string
+    private function deepJsonDecode(string $value, int $maxDepth = 3)
+    {
+        $current = $value;
+        for ($i = 0; $i < $maxDepth; $i++) {
+            $decoded = json_decode($current, true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                // maybe slashes are escaping quotes
+                $current = stripslashes($current);
+                $decoded = json_decode($current, true);
+            }
+            if (json_last_error() === JSON_ERROR_NONE) {
+                if (is_array($decoded)) return $decoded;
+                if (is_string($decoded)) { $current = $decoded; continue; }
+            }
+            break;
+        }
+        return null;
+    }
+
+    private function toFloat($v): ?float
+    {
+        if ($v === null || $v === '') return null;
+        return (float) str_replace(',', '.', (string) $v);
+    }
+
+    public function chunkSize(): int { return 1000; }
+    public function batchSize(): int { return 1000; }
 }

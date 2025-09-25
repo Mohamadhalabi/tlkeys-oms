@@ -70,5 +70,6 @@
   "No :resource": "No :resource",
 
   "Available in branch: :stock": "Available in branch: :stock",
-  "Available in branch: :count": "Available in branch: :count"
+  "Available in branch: :count": "Available in branch: :count",
+  "orders.product_exists": "This product already exists in the order."
 }
