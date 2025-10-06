@@ -12,7 +12,7 @@ return new class extends Migration {
             $table->foreignId('customer_id')->constrained()->cascadeOnDelete();
             $table->foreignId('seller_id')->nullable()->constrained('users')->nullOnDelete();
             $table->enum('type', ['proforma','order'])->default('proforma');
-            $table->enum('status', ['draft','confirmed','paid','cancelled'])->default('draft');
+            $table->enum('status', ['on_hold','processing','completed','cancelled'])->default('on_hold');
             $table->decimal('subtotal', 12, 2)->default(0);
             $table->decimal('discount', 12, 2)->default(0);
             $table->decimal('total', 12, 2)->default(0);

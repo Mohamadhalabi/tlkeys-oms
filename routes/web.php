@@ -3,10 +3,13 @@
 use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ProductImportController;
+use App\Http\Controllers\OrderPdfController;
+
 
 Route::get('/', function () {
-    return view('welcome');
-});
+    return view('landing');   // resources/views/landing.blade.php
+})->name('landing');
+
 
 Route::get('/dashboard', function () {
     return view('dashboard');
@@ -30,4 +33,8 @@ Route::post('/admin/products/import', \App\Http\Controllers\ProductImportControl
     ->name('products.import');
 
 
+Route::middleware(['web','auth'])->group(function () {
+    Route::get('/admin/orders/{order}/pdf', [OrderPdfController::class, 'show'])
+        ->name('admin.orders.pdf');
+});
 require __DIR__.'/auth.php';

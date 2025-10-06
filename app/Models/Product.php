@@ -9,14 +9,10 @@ use Spatie\Translatable\HasTranslations;
 class Product extends Model
 {
     use HasTranslations;
-    
-    protected $fillable = ['sku', 'title', 'price', 'sale_price', 'weight', 'image'];
 
+    protected $fillable = ['sku', 'title', 'price', 'sale_price', 'weight', 'image','cost_price'];
     public array $translatable = ['title'];
-    /**
-     * Many-to-many to branches with pivot (stock, stock_alert).
-     * Matches how your InventoryService adjusts stock via $product->branches()->updateExistingPivot(...)
-     */
+
     public function branches()
     {
         return $this->belongsToMany(Branch::class, 'product_branch')
@@ -24,15 +20,11 @@ class Product extends Model
             ->withTimestamps();
     }
 
-    /**
-     * Optional convenience: direct hasMany to the pivot model if you use ProductBranch model elsewhere.
-     */
     public function stocks()
     {
         return $this->hasMany(ProductBranch::class);
     }
 
-    /** If you want a "inventories" alias for Filament repeater usage */
     public function inventories()
     {
         return $this->hasMany(ProductBranch::class, 'product_id');
@@ -43,9 +35,32 @@ class Product extends Model
         return $branchId ? $this->stocks()->where('branch_id', $branchId)->first() : null;
     }
 
-    /** Products that are available (have a pivot row) for a branch */
     public function scopeForBranch(Builder $q, int $branchId): Builder
     {
         return $q->whereHas('branches', fn ($b) => $b->where('branches.id', $branchId));
+    }
+
+    /** A reliable image source for mPDF (local paths preferred). */
+    public function pdfImageSrc(): ?string
+    {
+        // placeholder (optional)
+        $placeholder = public_path('images/placeholder-120.png');
+        $asFileUrl = fn(string $p) => (str_starts_with($p, 'file://') ? $p : 'file://' . $p);
+
+        if (!$this->image) {
+            return is_file($placeholder) ? $asFileUrl($placeholder) : null;
+        }
+
+        // Relative path in storage/app/public/...
+        if (!preg_match('~^https?://~i', $this->image)) {
+            $local = public_path('storage/' . ltrim($this->image, '/'));
+            if (is_file($local)) {
+                return $asFileUrl($local);
+            }
+            return is_file($placeholder) ? $asFileUrl($placeholder) : null;
+        }
+
+        // Remote URL (only if you enabled enable_remote=true). Otherwise try placeholder.
+        return $this->image;
     }
 }

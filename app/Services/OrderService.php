@@ -35,11 +35,11 @@ class OrderService
      * Confirm an order (debits wallet and decrements stock).
      * Assumes:
      * - $order->type === 'order'
-     * - $order->status === 'draft'
+     * - $order->status === 'on_hold'
      */
     public static function confirm(Order $order): void
     {
-        if (!($order->type === 'order' && $order->status === 'draft')) {
+        if (!($order->type === 'order' && $order->status === 'on_hold')) {
             return;
         }
 
