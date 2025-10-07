@@ -16,6 +16,9 @@ class User extends Authenticatable
         'email',
         'password',
         'branch_id',
+        'is_active',
+        'can_see_cost',
+        'can_sell_below_cost',
     ];
 
     protected $hidden = [
@@ -24,14 +27,18 @@ class User extends Authenticatable
     ];
 
     protected $casts = [
-        'email_verified_at' => 'datetime',
-        'password' => 'hashed',
+        'email_verified_at'   => 'datetime',
+        'password'            => 'hashed',
+        'is_active'           => 'bool',
+        'can_see_cost'        => 'bool',
+        'can_sell_below_cost' => 'bool',
     ];
 
     public function branch()
     {
         return $this->belongsTo(\App\Models\Branch::class);
     }
+
     public function isAdmin(): bool
     {
         return $this->hasRole('admin');

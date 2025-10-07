@@ -13,15 +13,20 @@ class CreateOrder extends CreateRecord
 
     protected function mutateFormDataBeforeCreate(array $data): array
     {
+        // auto-assign seller/branch for sellers
+        $user = auth()->user();
+        if ($user?->hasRole('seller')) {
+            $data['seller_id'] = $user->id;
+            $data['branch_id'] = $data['branch_id'] ?? $user->branch_id;
+        }
+
         $code = $data['currency'] ?? 'USD';
         $rate = CurrencyRate::getRate($code);
         $data['exchange_rate'] = $rate;
 
-        // Subtotal in USD from items (qty * unit_price are already USD)
         $subtotalUsd = collect($data['items'] ?? [])
             ->sum(fn ($i) => (float)($i['qty'] ?? 0) * (float)($i['unit_price'] ?? 0));
 
-        // These are already USD (the form converts from local → USD)
         $discountUsd = (float)($data['discount'] ?? 0);
         $shippingUsd = (float)($data['shipping'] ?? 0);
 
@@ -51,8 +56,6 @@ class CreateOrder extends CreateRecord
             ->where('product_id', $productId)
             ->where('branch_id', $branchId)
             ->lockForUpdate()
-            ->update([
-                'stock' => DB::raw('GREATEST(0, stock + (' . $delta . '))'),
-            ]);
+            ->update(['stock' => DB::raw('GREATEST(0, stock + (' . $delta . '))')]);
     }
 }

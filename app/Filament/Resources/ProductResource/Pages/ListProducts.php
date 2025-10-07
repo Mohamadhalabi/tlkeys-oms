@@ -18,9 +18,14 @@ class ListProducts extends ListRecords
 
     protected function getHeaderActions(): array
     {
+        // Sellers: read-only (no create / import)
+        if (!auth()->user()?->hasRole('admin')) {
+            return [];
+        }
+
+        // Admins:
         return [
             Actions\CreateAction::make(),
-
             Actions\Action::make('importProducts')
                 ->label(__('Import products'))
                 ->icon('heroicon-m-arrow-up-tray')
@@ -34,7 +39,7 @@ class ListProducts extends ListRecords
 
                     Forms\Components\FileUpload::make('file')
                         ->label(__('Excel/CSV file'))
-                        ->disk('local')                 // or 'public'
+                        ->disk('local')
                         ->directory('imports')
                         ->preserveFilenames()
                         ->acceptedFileTypes([
@@ -45,7 +50,7 @@ class ListProducts extends ListRecords
                         ->required(),
                 ])
                 ->action(function (array $data) {
-                    $path = Storage::disk('local')->path($data['file']); // e.g. storage/app/imports/...
+                    $path = Storage::disk('local')->path($data['file']);
                     Excel::import(new ProductsImport((int)$data['branch_id']), $path);
 
                     Notification::make()

@@ -22,11 +22,10 @@ class SellerPanelProvider extends PanelProvider
     {
         return $panel
             ->id('seller')
-            ->path('seller')                 // /seller/*
+            ->path('seller')
             ->brandName('TLKeys OMS — Seller')
-            ->login()                        // ← REQUIRED to register /seller/login
-            // ->passwordReset()             // optional
-            ->authGuard('web')               // or 'seller' if you have a separate guard
+            ->login()
+            ->authGuard('web')
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,
@@ -38,11 +37,19 @@ class SellerPanelProvider extends PanelProvider
                 DisableBladeIconComponents::class,
                 DispatchServingFilamentEvent::class,
             ])
-            ->authMiddleware([
-                Authenticate::class,
+            ->authMiddleware([Authenticate::class])
+
+            // 👇 register ONLY what sellers should see
+            ->resources([
+                \App\Filament\Resources\OrderResource::class,
+                \App\Filament\Resources\CustomerResource::class,
+                \App\Filament\Resources\ProductResource::class, // read-only for sellers
             ])
-            ->pages([
-                Pages\Dashboard::class,
-            ]);
+            ->pages([ Pages\Dashboard::class ])
+            ->navigationGroups(['Sales', 'Customers', 'Catalog'])
+
+            // (optional) keep admins out of this panel completely:
+            // ->canAccess(fn ($user) => $user?->hasRole('seller') ?? false)
+        ;
     }
 }

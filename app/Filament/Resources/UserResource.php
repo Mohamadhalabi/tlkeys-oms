@@ -39,13 +39,13 @@ class UserResource extends Resource
                         ->unique(ignoreRecord: true),
 
                     Forms\Components\TextInput::make('password')
-                        ->label('Password')
                         ->password()
                         ->revealable()
-                        ->dehydrateStateUsing(fn ($state) => filled($state) ? Hash::make($state) : null)
-                        ->required(fn (string $context): bool => $context === 'create')
+                        ->dehydrateStateUsing(fn ($state) => filled($state) ? \Illuminate\Support\Facades\Hash::make($state) : null)
+                        ->required(fn (string $operation): bool => $operation === 'create')   // ✅
                         ->dehydrated(fn ($state) => filled($state))
                         ->minLength(8),
+
                 ])->columns(2),
 
             Forms\Components\Section::make('Access & Branch')

@@ -6,7 +6,15 @@ use Illuminate\Database\Eloquent\Model;
 
 class Customer extends Model
 {
-    protected $fillable = ['code','name','email','phone','address','wallet_balance']; // + code
+    protected $fillable = [
+        'code',
+        'name',
+        'email',
+        'phone',
+        'address',
+        'wallet_balance',
+        'seller_id', // 👈 ensure this is fillable
+    ];
 
     protected static function booted(): void
     {
@@ -42,5 +50,14 @@ class Customer extends Model
     {
         $this->decrement('wallet_balance', $amount);
         return $this->walletTransactions()->create(['amount'=>-1*$amount,'type'=>'debit','reference'=>$ref,'meta'=>$meta]);
+    }
+
+    public function seller()
+    {
+        return $this->belongsTo(\App\Models\User::class, 'seller_id');
+    }
+    public function orders()
+    {
+        return $this->hasMany(\App\Models\Order::class);
     }
 }

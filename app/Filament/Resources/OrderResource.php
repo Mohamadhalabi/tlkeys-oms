@@ -35,6 +35,10 @@ class OrderResource extends \Filament\Resources\Resource
         $user   = Auth::user();
         $locale = app()->getLocale();
 
+        // ── Seller permissions (admins always allowed)
+        $canSeeCost       = (bool) (($user?->can_see_cost ?? false) || $user?->hasRole('admin'));
+        $canSellBelowCost = (bool) (($user?->can_sell_below_cost ?? false) || $user?->hasRole('admin'));
+
         $titleFor = function (Product $p, string $locale): string {
             if (method_exists($p, 'getTranslation')) {
                 try {
@@ -48,16 +52,14 @@ class OrderResource extends \Filament\Resources\Resource
             return (string) ($p->title ?? '');
         };
 
-        // math helper (USD for persistence; convert for display)
+        // USD math; mirror to FX for display
         $compute = function (array $items, float $discountUsd, float $shippingUsd, float $rate): array {
             $subtotalUsd = collect($items)->sum(function ($row) {
                 $qty  = (float)($row['qty'] ?? 0);
-                $unit = (float)($row['unit_price'] ?? 0); // stored/priced in USD
+                $unit = (float)($row['unit_price'] ?? 0);
                 return $qty * $unit;
             });
-
             $totalUsd = max(0, $subtotalUsd - $discountUsd + $shippingUsd);
-
             return [
                 'subtotal_usd' => $subtotalUsd,
                 'total_usd'    => $totalUsd,
@@ -79,12 +81,11 @@ class OrderResource extends \Filament\Resources\Resource
         );
 
         return $form->schema([
-            # ───────────────────────────────────────────────────────────────────────
-            # Order Info (Currency at the top)
-            # ───────────────────────────────────────────────────────────────────────
+            // ────────────────────────────────────────────────────────────────────
+            // Order Info
+            // ────────────────────────────────────────────────────────────────────
             Forms\Components\Section::make(__('Order Info'))
                 ->schema([
-                    // Currency selector (drives all local inputs)
                     Forms\Components\Select::make('currency')
                         ->label(__('Currency'))
                         ->options(function () {
@@ -96,32 +97,31 @@ class OrderResource extends \Filament\Resources\Resource
                         ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
                             $rate = CurrencyRate::getRate($state ?: 'USD');
                             $set('exchange_rate', $rate);
-
-                            // prime local mirrors (discount/shipping)
                             $set('discount_local', ((float)($get('discount') ?? 0)) * $rate);
                             $set('shipping_local', ((float)($get('shipping') ?? 0)) * $rate);
-
-                            // prime each row's local unit price from persisted USD
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                                $usd = (float) ($get("items.$i.unit_price") ?? 0);
-                                $set("items.$i.unit_price_local", $usd * $rate);
+                                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
+                                $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
+                                $set("items.$i.unit_price_local", $usdUnit * $rate);
+                                $set("items.$i.line_total_local", $usdLine * $rate);
+                                // force cost helperText refresh on currency change
+                                $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
                             $rate = CurrencyRate::getRate($state ?: 'USD');
                             $set('exchange_rate', $rate);
-
-                            // update local mirrors
                             $set('discount_local', ((float)($get('discount') ?? 0)) * $rate);
                             $set('shipping_local', ((float)($get('shipping') ?? 0)) * $rate);
-
-                            // update each row's local unit price label/value
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                                $usd = (float) ($get("items.$i.unit_price") ?? 0);
-                                $set("items.$i.unit_price_local", $usd * $rate);
+                                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
+                                $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
+                                $set("items.$i.unit_price_local", $usdUnit * $rate);
+                                $set("items.$i.line_total_local", $usdLine * $rate);
+                                $set("items.$i.__currency_mirror", microtime(true));
                             }
                         }),
-                    // Persisted exchange rate (single source of truth)
+
                     Forms\Components\Hidden::make('exchange_rate')
                         ->default(fn (Forms\Get $get) => CurrencyRate::getRate($get('currency') ?: 'USD'))
                         ->dehydrated(true),
@@ -131,15 +131,55 @@ class OrderResource extends \Filament\Resources\Resource
                         ->options(fn () => Branch::orderBy('name')->pluck('name', 'id'))
                         ->default(fn () => $user->hasRole('seller') ? $user->branch_id : null)
                         ->disabled(fn () => $user->hasRole('seller'))
-                        ->required(),
+                        ->required()
+                        ->reactive()
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                            foreach (array_keys((array)($get('items') ?? [])) as $i) {
+                                $set("items.$i.__branch_mirror", (int) $state);
+                                $pid = (int) ($get("items.$i.product_id") ?? 0);
+                                if ($pid) {
+                                    $prod  = Product::with(['stocks' => fn ($q) => $q->where('branch_id', (int) $state)])->find($pid);
+                                    $stock = optional($prod?->stocks?->first())->stock;
+                                    $set("items.$i.stock_in_branch", is_null($stock) ? null : (int) $stock);
+                                }
+                            }
+                        })
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
+                            $items = (array) ($get('items') ?? []);
+                            foreach (array_keys($items) as $i) {
+                                $set("items.$i.__branch_mirror", (int) $state);
+                                $pid = (int) ($get("items.$i.product_id") ?? 0);
+                                if ($pid) {
+                                    $prod  = Product::with(['stocks' => fn ($q) => $q->where('branch_id', (int) $state)])->find($pid);
+                                    $stock = optional($prod?->stocks?->first())->stock;
+                                    $set("items.$i.stock_in_branch", is_null($stock) ? null : (int) $stock);
+                                } else {
+                                    $set("items.$i.stock_in_branch", null);
+                                }
+                            }
+                        }),
+
+                    // Type must be before Customer so required() can react
+                    Forms\Components\Select::make('type')
+                        ->label(__('Type'))
+                        ->options(['proforma' => __('Proforma'), 'order' => __('Order')])
+                        ->default('proforma')
+                        ->required()
+                        ->reactive(),
 
                     Forms\Components\Select::make('customer_id')
                         ->label(__('Customer'))
-                        ->options(fn () => Customer::orderBy('name')->pluck('name', 'id'))
-                        ->searchable()->preload()->required()
+                        ->options(function () use ($user) {
+                            $q = Customer::query()->orderBy('name');
+                            if ($user?->hasRole('seller')) {
+                                $q->where('seller_id', $user->id);
+                            }
+                            return $q->pluck('name','id');
+                        })
+                        ->searchable()->preload()
+                        ->required(fn (Forms\Get $get) => $get('type') === 'order')
                         ->reactive()
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
-                            // mirror to rows so "Previous sales to this customer" refreshes
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $set("items.$i.__customer_mirror", (int) $state);
                             }
@@ -150,36 +190,101 @@ class OrderResource extends \Filament\Resources\Resource
                             Forms\Components\TextInput::make('phone')->label(__('Phone'))->nullable(),
                             Forms\Components\Textarea::make('address')->label(__('Address'))->rows(3)->nullable(),
                         ])
-                        ->createOptionUsing(fn (array $data) => Customer::create($data)->id),
+                        ->createOptionUsing(function (array $data) use ($user) {
+                            if ($user?->hasRole('seller')) {
+                                $data['seller_id'] = $user->id; // auto-assign on create
+                            }
+                            return Customer::create($data)->id;
+                        }),
 
-                    Forms\Components\Select::make('type')
-                        ->label(__('Type'))
-                        ->options(['proforma' => __('Proforma'), 'order' => __('Order')])
-                        ->default('proforma')->required(),
+
+                    Forms\Components\Select::make('payment_status')
+                        ->label(__('Payment status'))
+                        ->options([
+                            'unpaid'          => __('Unpaid'),
+                            'partially_paid'  => __('Partially paid'),
+                            'paid'            => __('Paid'),
+                            'debt'            => __('Debt'),
+                        ])
+                        ->default('unpaid')
+                        ->visible(fn (Forms\Get $get) => $get('type') === 'order')
+                        ->dehydrated(fn (Forms\Get $get) => $get('type') === 'order')   // ← important
+                        ->required(fn (Forms\Get $get) => $get('type') === 'order'),
 
                     Forms\Components\Select::make('status')
-                        ->label(__('Status'))
+                        ->label(__('Order status'))
                         ->options([
-                            'on_hold'   => __('On hold'),
-                            'draft'     => __('Draft'),
-                            'pending'   => __('Pending'),
-                            'processing'=> __('Processing'),
-                            'completed' => __('Completed'),
-                            'cancelled' => __('Cancelled'),
-                            'refunded'  => __('Refunded'),
-                            'failed'    => __('Failed'),
+                            'on_hold'    => __('On hold'),
+                            'draft'      => __('Draft'),
+                            'pending'    => __('Pending'),
+                            'processing' => __('Processing'),
+                            'completed'  => __('Completed'),
+                            'cancelled'  => __('Cancelled'),
+                            'refunded'   => __('Refunded'),
+                            'failed'     => __('Failed'),
                         ])
-                        ->default('on_hold')
-                        ->required(),
+                        ->default('pending')
+                        ->visible(fn (Forms\Get $get) => $get('type') === 'order')
+                        ->dehydrated(fn (Forms\Get $get) => $get('type') === 'order'),
+
+
 
                     Forms\Components\TextInput::make('margin_percent')
                         ->label(__('Margin % over cost (optional)'))
                         ->numeric()->minValue(0)->step('0.01')
+                        ->reactive()
+                        ->visible(fn () => (auth()->user()?->hasRole('admin') ?? false) || (auth()->user()?->can_see_cost ?? false))
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($canSellBelowCost, $canSeeCost) {
+                            $items = (array) ($get('items') ?? []);
+                            if (empty($items)) return;
+
+                            $rate = (float) ($get('exchange_rate') ?? 1);
+                            if ($rate <= 0) $rate = 1;
+
+                            foreach (array_keys($items) as $i) {
+                                $pid = (int) ($get("items.$i.product_id") ?? 0);
+                                if (!$pid) continue;
+
+                                $product = Product::find($pid);
+                                $cost    = (float) ($get("items.$i.cost_price") ?? ($product?->cost_price ?? 0));
+                                $qty     = (float) ($get("items.$i.qty") ?? 1);
+
+                                $margin = (float) ($state ?? 0);
+                                if ($margin > 0 && $cost > 0) {
+                                    $usd = round($cost * (1 + $margin / 100), 2);
+                                } else {
+                                    $usd = (float) ($product?->sale_price ?? $product?->price ?? 0);
+                                }
+
+                                // Enforce floor if not allowed to sell below cost
+                                if (!$canSellBelowCost && $cost > 0 && $usd < $cost) {
+                                    $usd = $cost;
+                                    $msg = $canSeeCost
+                                        ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
+                                        : __('Unit price raised to the minimum allowed.');
+                                    Notification::make()->title($msg)->warning()->send();
+                                }
+
+                                $set("items.$i.unit_price", $usd);
+                                $set("items.$i.unit_price_local", $usd * $rate);
+                                $set("items.$i.line_total", $qty * $usd);
+                                $set("items.$i.line_total_local", $qty * $usd * $rate);
+                                $set("items.$i.__currency_mirror", microtime(true));
+                            }
+
+                            // Refresh totals
+                            $itemsNow = (array) ($get('items') ?? []);
+                            $subtotalUsd = collect($itemsNow)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0));
+                            $totalUsd    = max(0, $subtotalUsd - (float)($get('discount') ?? 0) + (float)($get('shipping') ?? 0));
+                            $set('subtotal', $subtotalUsd);
+                            $set('total', $totalUsd);
+                        }),
+
                 ])->columns(5),
 
-            # ───────────────────────────────────────────────────────────────────────
-            # Items
-            # ───────────────────────────────────────────────────────────────────────
+            // ────────────────────────────────────────────────────────────────────
+            // Items
+            // ────────────────────────────────────────────────────────────────────
             Forms\Components\Section::make(__('Items'))
                 ->schema([
                     Forms\Components\Repeater::make('items')
@@ -189,7 +294,6 @@ class OrderResource extends \Filament\Resources\Resource
                         ->columns(12)
                         ->live(debounce: 250)
                         ->schema([
-                            // Thumb
                             Forms\Components\Placeholder::make('product_image')
                                 ->label('')
                                 ->content(function (Forms\Get $get) use ($fallbackImg, $locale, $titleFor) {
@@ -212,21 +316,33 @@ class OrderResource extends \Filament\Resources\Resource
                                         '<img src="'.e($url).'" alt="'.e($alt).'" style="width:60px;height:60px;object-fit:contain;border-radius:6px;border:1px solid #ddd;" />'
                                     );
                                 })
-                                ->columnSpan(1)
                                 ->disableLabel()
-                                ->extraAttributes(['class' => 'pt-6']),
+                                ->extraAttributes(['class' => 'pt-6'])
+                                ->columnSpan(['default' => 12, 'lg' => 1]),
 
-                            // helpers
+                            // helpers / mirrors
                             Forms\Components\Hidden::make('__customer_mirror')->dehydrated(false)->reactive(),
+                            Forms\Components\Hidden::make('__branch_mirror')->dehydrated(false)->reactive(),
+                            Forms\Components\Hidden::make('__currency_mirror')->dehydrated(false)->reactive(),
                             Forms\Components\Hidden::make('stock_in_branch')->dehydrated(false),
-                            Forms\Components\Hidden::make('cost_price')->dehydrated(false),
 
-                            // USD price persisted (hidden) + local mirror shown to user
+                            // always have cost cached
+                            Forms\Components\Hidden::make('cost_price')
+                                ->dehydrated(false)
+                                ->reactive()
+                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                                    if ($state === null && $pid = (int) $get('product_id')) {
+                                        $set('cost_price', (float) (Product::find($pid)?->cost_price ?? 0));
+                                    }
+                                }),
+
                             Forms\Components\Hidden::make('unit_price')->dehydrated(true),
+                            Forms\Components\Hidden::make('line_total')->dehydrated(false),
 
                             Forms\Components\Select::make('product_id')
                                 ->label(__('Product'))
                                 ->options(function (Forms\Get $get) use ($titleFor, $locale) {
+                                    $get('__branch_mirror'); // refresh on branch change
                                     $chosenBranch = $get('../../branch_id');
                                     $userBranch   = auth()->user()?->branch_id;
                                     $branchId     = $chosenBranch ?: $userBranch;
@@ -248,9 +364,8 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->preload()
                                 ->required()
                                 ->reactive()
-                                ->columnSpan(6)
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals) {
-                                    // prevent duplicate product rows
+                                ->columnSpan(['default' => 12, 'lg' => 5])
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost) {
                                     if ($state) {
                                         $items = collect($get('../../items') ?? []);
                                         $dups  = $items->pluck('product_id')->filter()->countBy();
@@ -259,6 +374,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             $set('unit_price', null);
                                             $set('unit_price_local', null);
                                             $set('line_total', null);
+                                            $set('line_total_local', null);
 
                                             Notification::make()
                                                 ->title(__('Product already added to this order.'))
@@ -285,19 +401,31 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set('stock_in_branch', $stock);
                                     $set('cost_price', $cost);
 
-                                    // margin override if applicable (still USD)
+                                    // margin override (USD)
                                     $margin = (float) ($get('../../margin_percent') ?? 0);
                                     if ($margin > 0 && $cost > 0) {
                                         $price = round($cost * (1 + $margin / 100), 2);
                                     }
 
-                                    // persist USD and show local currency
+                                    // Enforce "not below cost"
+                                    if (!$canSellBelowCost && $cost > 0 && $price < $cost) {
+                                        $price = $cost;
+                                        $msg = $canSeeCost
+                                            ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
+                                            : __('Unit price raised to the minimum allowed.');
+                                        Notification::make()->title($msg)->warning()->send();
+                                    }
+
                                     $rate = (float) ($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
 
                                     $set('unit_price', $price); // USD
                                     $set('unit_price_local', $price * $rate);
                                     $set('line_total', $qty * $price); // USD
+                                    $set('line_total_local', $qty * $price * $rate);
+
+                                    // nudge helperText to refresh cost when product picks
+                                    $set('__currency_mirror', microtime(true));
 
                                     if ($stock === 0) {
                                         Notification::make()
@@ -308,23 +436,38 @@ class OrderResource extends \Filament\Resources\Resource
                                             ->send();
                                     }
 
-                                    // recompute totals
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
                                 })
-                                ->helperText(function (Forms\Get $get) {
-                                    $productId    = $get('product_id');
-                                    $chosenBranch = $get('../../branch_id') ?: auth()->user()?->branch_id;
-                                    if (!$productId || !$chosenBranch) return null;
+                                ->helperText(function (Forms\Get $get) use ($canSeeCost) {
+                                    // reactive to branch & currency changes
+                                    $get('__branch_mirror');
+                                    $get('__currency_mirror');
 
-                                    $prod  = Product::with(['stocks' => fn ($q) => $q->where('branch_id', $chosenBranch)])->find($productId);
-                                    $stock = optional($prod?->stocks?->first())->stock;
+                                    $stock   = $get('stock_in_branch');
+                                    $costUsd = (float) ($get('cost_price') ?? 0);
 
-                                    return is_null($stock)
-                                        ? null
-                                        : ($stock == 0
+                                    $rate = (float) ($get('../../exchange_rate') ?? 1);
+                                    if ($rate <= 0) $rate = 1;
+                                    $cur  = $get('../../currency') ?: 'USD';
+
+                                    $bits = [];
+
+                                    if (!is_null($stock)) {
+                                        $bits[] = $stock == 0
                                             ? __('Available in branch: :count', ['count' => 0]) . ' — ' . __('out of stock')
-                                            : __('Available in branch: :count', ['count' => $stock]));
+                                            : __('Available in branch: :count', ['count' => $stock]);
+                                    }
+
+                                    if ($canSeeCost && $costUsd > 0) {
+                                        $bits[] = __('Cost: :usd USD (:fx :cur)', [
+                                            'usd' => number_format($costUsd, 2),
+                                            'fx'  => number_format($costUsd * $rate, 2),
+                                            'cur' => $cur,
+                                        ]);
+                                    }
+
+                                    return empty($bits) ? null : implode(' — ', $bits);
                                 }),
 
                             Forms\Components\TextInput::make('qty')
@@ -332,18 +475,20 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()->minValue(1)->default(1)
                                 ->inputMode('decimal')->step('1')
                                 ->live(onBlur: true)
-                                ->columnSpan(2)
+                                ->columnSpan(['default' => 6, 'lg' => 2])
                                 ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals) {
                                     $qty  = (float) $state;
                                     $usd  = (float) ($get('unit_price') ?? 0);
-                                    $set('line_total', $qty * $usd); // USD
-
                                     $rate = (float) ($get('../../exchange_rate') ?? 1);
+                                    if ($rate <= 0) $rate = 1;
+
+                                    $set('line_total', $qty * $usd);
+                                    $set('line_total_local', $qty * $usd * $rate);
+
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
                                 }),
 
-                            // Local currency price editor (converts to USD under the hood)
                             Forms\Components\TextInput::make('unit_price_local')
                                 ->label(fn (Forms\Get $get) => __('Unit price (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
                                 ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
@@ -353,25 +498,38 @@ class OrderResource extends \Filament\Resources\Resource
                                     $rate = (float)($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
                                     $usd  = (float)($get('unit_price') ?? 0);
+                                    $qty  = (float)($get('qty') ?? 1);
                                     $set('unit_price_local', $usd * $rate);
+                                    $set('line_total_local', $qty * $usd * $rate);
                                 })
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals) {
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost) {
                                     $rate = (float)($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
 
-                                    // local → USD for persistence
                                     $usd = (float)$state / $rate;
+
+                                    // enforce floor
+                                    $cost = (float) ($get('cost_price') ?? 0);
+                                    if (!$canSellBelowCost && $cost > 0 && $usd < $cost) {
+                                        $usd = $cost;
+                                        $set('unit_price_local', $usd * $rate);
+                                        $msg = $canSeeCost
+                                            ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
+                                            : __('Unit price raised to the minimum allowed.');
+                                        Notification::make()->title($msg)->warning()->send();
+                                    }
+
                                     $set('unit_price', $usd);
 
-                                    // update line total (USD)
                                     $qty = (float) ($get('qty') ?? 1);
                                     $set('line_total', $qty * $usd);
+                                    $set('line_total_local', $qty * (float)$state);
 
-                                    // update totals
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
                                 })
-                                ->helperText(function (Forms\Get $get) {
+                                ->helperText(function (Forms\Get $get) use ($canSeeCost) {
+                                    if (!$canSeeCost) return null;
                                     $cost   = (float) ($get('cost_price') ?? 0);
                                     $margin = (float) ($get('../../margin_percent') ?? 0);
                                     $rate   = (float) ($get('../../exchange_rate') ?? 1);
@@ -379,23 +537,23 @@ class OrderResource extends \Filament\Resources\Resource
                                     $local = round($cost * (1 + $margin/100) * max(1,$rate), 2);
                                     return __('Cost + margin ≈ :calc', ['calc' => number_format($local, 2)]);
                                 })
-                                ->columnSpan(2),
+                                ->columnSpan(['default' => 6, 'lg' => 2]),
 
-                            Forms\Components\TextInput::make('line_total')
-                                ->label(__('Total'))
-                                ->numeric()
+                            Forms\Components\TextInput::make('line_total_local')
+                                ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
+                                ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
                                 ->disabled()
-                                ->columnSpan(1),
+                                ->numeric()
+                                ->extraAttributes(['style' => 'font-weight:600;'])
+                                ->columnSpan(['default' => 6, 'lg' => 2]),
 
-                            // Previous sales for selected customer
+                            // Previous sales (full width under row)
                             Forms\Components\Placeholder::make('prev_sales')
                                 ->label(__('Previous sales to this customer'))
                                 ->reactive()
                                 ->content(function (Forms\Get $get) {
                                     $productId  = $get('product_id');
                                     $customerId = (int) ($get('../../customer_id') ?? 0);
-
-                                    // Touch mirror so Filament tracks dependency
                                     $get('__customer_mirror');
 
                                     if (!$productId || !$customerId) {
@@ -467,18 +625,16 @@ class OrderResource extends \Filament\Resources\Resource
                         }),
                 ]),
 
-            # ───────────────────────────────────────────────────────────────────────
-            # Totals & Currency (no currency picker here anymore)
-            # ───────────────────────────────────────────────────────────────────────
+            // ────────────────────────────────────────────────────────────────────
+            // Totals & Currency
+            // ────────────────────────────────────────────────────────────────────
             Forms\Components\Section::make(__('Totals & Currency'))
                 ->schema([
-                    // persisted USD numbers
                     Forms\Components\Hidden::make('subtotal')->default(0),
                     Forms\Components\Hidden::make('discount')->default(0),
                     Forms\Components\Hidden::make('shipping')->default(0),
                     Forms\Components\Hidden::make('total')->default(0),
 
-                    // Discount/Shipping local mirrors (use top-level currency)
                     Forms\Components\TextInput::make('discount_local')
                         ->label(fn (Forms\Get $get) => __('Discount'))
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
@@ -518,7 +674,6 @@ class OrderResource extends \Filament\Resources\Resource
                         )
                         ->columnSpanFull(),
 
-                    // Subtotal (fx) – red
                     Forms\Components\Placeholder::make('subtotal_display')
                         ->label(fn (Forms\Get $get) => __('Subtotal (:cur)', ['cur' => $get('currency') ?: 'USD']))
                         ->content(function (Forms\Get $get) {
@@ -536,12 +691,10 @@ class OrderResource extends \Filament\Resources\Resource
                         })
                         ->columnSpan(6),
 
-                    // Total (fx) – red
                     Forms\Components\Placeholder::make('total_display')
                         ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('currency') ?: 'USD']))
                         ->content(function (Forms\Get $get) {
                             $rate = (float)($get('exchange_rate') ?? 1);
-
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::with('items')->find($id);
@@ -549,7 +702,6 @@ class OrderResource extends \Filament\Resources\Resource
                                     ? $order->items->map(fn($i) => ['qty' => (float)$i->qty, 'unit_price' => (float)$i->unit_price])->toArray()
                                     : [];
                             }
-
                             $subtotalUsd = collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0));
                             $discountUsd = (float) ($get('discount') ?? 0);
                             $shippingUsd = (float) ($get('shipping') ?? 0);
@@ -577,9 +729,23 @@ class OrderResource extends \Filament\Resources\Resource
                     ->state(fn (Order $r) => $r->seller?->name ?? 'Admin')
                     ->searchable()
                     ->wrap(),
-                Tables\Columns\TextColumn::make('type')->label(__('Type'))->badge()->wrap()
-                    ->color(fn (string $state): string => $state === 'order' ? 'success' : 'gray'),
-                Tables\Columns\TextColumn::make('status')->label(__('Status'))->badge()->wrap(),
+                Tables\Columns\TextColumn::make('type')
+                    ->label(__('Type'))
+                    ->badge()
+                    ->wrap()
+                    ->color(fn (string $state) => $state === 'order' ? 'success' : 'gray'),
+
+                Tables\Columns\TextColumn::make('payment_status') // if you have this column
+                    ->label(__('Payment'))
+                    ->badge()
+                    ->color(fn (string $state) => match ($state) {
+                        'paid'            => 'success',
+                        'unpaid'          => 'danger',
+                        'partially_paid'  => 'warning',
+                        'debt'            => 'gray',
+                        default           => 'gray',
+                    }),
+
                 Tables\Columns\TextColumn::make('shipping_fx')
                     ->label(__('Shipping'))
                     ->state(fn (Order $r) => number_format((float)$r->shipping * (float)$r->exchange_rate, 2))
@@ -603,11 +769,13 @@ class OrderResource extends \Filament\Resources\Resource
                     ->options(fn () => Branch::orderBy('name')->pluck('name', 'id')),
                 Tables\Filters\SelectFilter::make('type')->label(__('Type'))
                     ->options(['proforma'=>__('Proforma'), 'order'=>__('Order')]),
-                Tables\Filters\SelectFilter::make('status')->label(__('Status'))->options([
-                    'on_hold'=>__('On hold'),'draft'=>__('Draft'),'pending'=>__('Pending'),
-                    'processing'=>__('Processing'),'completed'=>__('Completed'),
-                    'cancelled'=>__('Cancelled'),'refunded'=>__('Refunded'),'failed'=>__('Failed'),
-                ]),
+                Tables\Filters\SelectFilter::make('payment_status')->label(__('Payment'))
+                    ->options([
+                        'unpaid' => __('Unpaid'),
+                        'partially_paid' => __('Partially paid'),
+                        'paid' => __('Paid'),
+                        'debt' => __('Debt'),
+                    ]),
                 Tables\Filters\SelectFilter::make('currency')->label(__('Currency'))
                     ->options(fn () => ['USD'=>'USD'] + CurrencyRate::query()->orderBy('code')->pluck('code','code')->toArray()),
             ])
@@ -637,11 +805,12 @@ class OrderResource extends \Filament\Resources\Resource
         $query = parent::getEloquentQuery();
         $user  = Auth::user();
 
-        if ($user?->hasRole('seller') && $user->branch_id) {
-            $query->where('branch_id', $user->branch_id);
+        if ($user?->hasRole('seller')) {
+            // Show only the seller’s own orders. If you also want to restrict by branch, add the branch line.
+            $query->where('seller_id', $user->id);
+            // if ($user->branch_id) $query->where('branch_id', $user->branch_id);
         }
 
-        // include items so list totals can be computed without N+1
         return $query->with(['customer','seller','branch','items']);
     }
 }

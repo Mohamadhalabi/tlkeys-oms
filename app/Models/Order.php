@@ -11,7 +11,7 @@ class Order extends Model
     protected $fillable = [
         'code',           // ← new, human-friendly code (TLOxxxxxx)
         'branch_id','customer_id','seller_id','type','status',
-        'subtotal','discount','shipping','total','currency','exchange_rate',
+        'subtotal','discount','shipping','total','currency','exchange_rate','payment_status'
     ];
 
     protected $casts = [
