@@ -1,5 +1,4 @@
 <?php
-// app/Models/Order.php
 
 namespace App\Models;
 
@@ -9,9 +8,11 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 class Order extends Model
 {
     protected $fillable = [
-        'code',           // ← new, human-friendly code (TLOxxxxxx)
-        'branch_id','customer_id','seller_id','type','status',
-        'subtotal','discount','shipping','total','currency','exchange_rate','payment_status'
+        'code',
+        'branch_id','customer_id','seller_id',
+        'type','status','payment_status','paid_amount',
+        'subtotal','discount','shipping','total',
+        'currency','exchange_rate',
     ];
 
     protected $casts = [
@@ -20,6 +21,7 @@ class Order extends Model
         'shipping'      => 'decimal:2',
         'total'         => 'decimal:2',
         'exchange_rate' => 'decimal:6',
+        'paid_amount'   => 'decimal:2',
     ];
 
     protected static function booted(): void
@@ -31,7 +33,6 @@ class Order extends Model
         });
     }
 
-    /** Create a unique code like TLO123456 */
     protected static function generateUniqueCode(string $prefix, int $digits): string
     {
         do {
@@ -47,15 +48,16 @@ class Order extends Model
     public function customer() { return $this->belongsTo(Customer::class); }
     public function seller()   { return $this->belongsTo(User::class,'seller_id'); }
 
-    // Normalize hyphen statuses coming from the UI
+    // All wallet transactions (debit + credits) for this order
+    public function walletTransactions() { return $this->hasMany(WalletTransaction::class); }
+    // Only credits (payments)
+    public function payments() { return $this->hasMany(WalletTransaction::class)->where('type', 'credit'); }
+
     protected function status(): Attribute
     {
-        return Attribute::make(
-            set: fn ($v) => $v === 'on-hold' ? 'on_hold' : $v
-        );
+        return Attribute::make(set: fn ($v) => $v === 'on-hold' ? 'on_hold' : $v);
     }
 
-    /** Recompute header totals from items (+ shipping − discount) */
     public function recalcTotals(): void
     {
         $subtotal = (float) $this->items()->sum('line_total');
@@ -64,7 +66,47 @@ class Order extends Model
 
         $this->updateQuietly([
             'subtotal' => round($subtotal, 2),
-            'total'    => round($subtotal - $discount + $shipping, 2),
+            'total'    => round(max(0, $subtotal - $discount + $shipping), 2),
         ]);
+    }
+
+    /** Keep wallet in sync: one DEBIT for total, optional CREDIT for paid_amount */
+    public function syncWallet(): void
+    {
+        // Proforma or missing customer => remove transactions tied to this order
+        if ($this->type !== 'order' || ! $this->customer_id) {
+            WalletTransaction::where('order_id', $this->id)->delete();
+            return;
+        }
+
+        // 1) Order debit (amount owed)
+        $debit = WalletTransaction::firstOrNew([
+            'order_id'    => $this->id,
+            'customer_id' => $this->customer_id,
+            'type'        => 'debit',
+            'note'        => 'Order ' . $this->code . ' total',
+        ]);
+        $debit->amount = (float) $this->total;
+        $debit->save();
+
+        // 2) Initial payment credit from header (paid_amount)
+        $paid = (float) ($this->paid_amount ?? 0);
+        if ($paid > 0) {
+            $credit = WalletTransaction::firstOrNew([
+                'order_id'    => $this->id,
+                'customer_id' => $this->customer_id,
+                'type'        => 'credit',
+                'note'        => 'Initial payment for ' . $this->code,
+            ]);
+            $credit->amount = $paid;
+            $credit->save();
+        } else {
+            WalletTransaction::where([
+                'order_id'    => $this->id,
+                'customer_id' => $this->customer_id,
+                'type'        => 'credit',
+                'note'        => 'Initial payment for ' . $this->code,
+            ])->delete();
+        }
     }
 }

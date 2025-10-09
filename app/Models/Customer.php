@@ -40,17 +40,26 @@ class Customer extends Model
         return $this->hasMany(WalletTransaction::class);
     }
 
-    public function credit(float $amount, ?string $ref=null, array $meta=[])
+    public function credit(float $amount, ?string $note = null, ?Order $order = null)
     {
-        $this->increment('wallet_balance', $amount);
-        return $this->walletTransactions()->create(['amount'=>$amount,'type'=>'credit','reference'=>$ref,'meta'=>$meta]);
+        return $this->walletTransactions()->create([
+            'order_id' => $order?->id,
+            'type'     => 'credit',
+            'amount'   => $amount,   // positive; events will +amount
+            'note'     => $note,
+        ]);
     }
 
-    public function debit(float $amount, ?string $ref=null, array $meta=[])
+    public function debit(float $amount, ?string $note = null, ?Order $order = null)
     {
-        $this->decrement('wallet_balance', $amount);
-        return $this->walletTransactions()->create(['amount'=>-1*$amount,'type'=>'debit','reference'=>$ref,'meta'=>$meta]);
+        return $this->walletTransactions()->create([
+            'order_id' => $order?->id,
+            'type'     => 'debit',
+            'amount'   => $amount,   // positive; events will -amount
+            'note'     => $note,
+        ]);
     }
+
 
     public function seller()
     {
