@@ -46,7 +46,7 @@ class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
                 );
 
                 // If product already existed and a cost was provided, update it.
-                if ($cost !== null && (float)$product->cost_price !== (float)$cost) {
+                if ($cost !== null && (float) $product->cost_price !== (float) $cost) {
                     $product->update(['cost_price' => $cost]);
                 }
 
@@ -66,10 +66,12 @@ class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
      * 2) Else decode JSON from "title" (handles double-encoded / curly quotes)
      * 3) Else use the raw string for both
      */
-    private function parseTitle(array $row): array
+    private function parseTitle(Collection|array $row): array
     {
-        $en = (string) ($row['title_en'] ?? '');
-        $ar = (string) ($row['title_ar'] ?? '');
+        $row = $row instanceof Collection ? $row->toArray() : $row;
+
+        $en  = (string) ($row['title_en'] ?? '');
+        $ar  = (string) ($row['title_ar'] ?? '');
         $raw = isset($row['title']) ? (string) $row['title'] : '';
 
         if ($en === '' && $ar === '' && $raw !== '') {
@@ -96,8 +98,10 @@ class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
      * - cost
      * Values like "12,34" are normalized.
      */
-    private function getCostPrice(array $row): ?float
+    private function getCostPrice(Collection|array $row): ?float
     {
+        $row = $row instanceof Collection ? $row->toArray() : $row;
+
         $candidates = [
             $row['cost_price'] ?? null,
             $row['cost'] ?? null,
@@ -146,8 +150,10 @@ class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
 
     private function toFloat($v): ?float
     {
-        if ($v === null || $v === '') return null;
-        return (float) str_replace(',', '.', (string) $v);
+        if ($v === null) return null;
+        $v = trim((string) $v);
+        if ($v === '') return null;
+        return (float) str_replace(',', '.', $v);
     }
 
     public function chunkSize(): int { return 1000; }
