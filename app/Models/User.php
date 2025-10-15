@@ -38,6 +38,12 @@ class User extends Authenticatable
     {
         return $this->belongsTo(\App\Models\Branch::class);
     }
+    
+    public function canAccessPanel(Panel $panel): bool
+    {
+    // current user should have Role to acces for exemple.
+    return true;
+    }
 
     public function isAdmin(): bool
     {
