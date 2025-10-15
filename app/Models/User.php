@@ -2,12 +2,14 @@
 
 namespace App\Models;
 
+use Filament\Models\Contracts\FilamentUser;
+use Filament\Panel;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Spatie\Permission\Traits\HasRoles;
 
-class User extends Authenticatable
+class User extends Authenticatable implements FilamentUser
 {
     use HasFactory, Notifiable, HasRoles;
 
@@ -36,13 +38,19 @@ class User extends Authenticatable
 
     public function branch()
     {
-        return $this->belongsTo(\App\Models\Branch::class);
+        return $this->belongsTo(Branch::class);
     }
-    
+
+    /**
+     * Grant access to Filament panels based on role or permission.
+     */
     public function canAccessPanel(Panel $panel): bool
     {
-    // current user should have Role to acces for exemple.
-    return true;
+        return match ($panel->getId()) {
+            'admin' => $this->hasRole('admin'),
+            'seller' => $this->hasRole('seller'),
+            default => false,
+        };
     }
 
     public function isAdmin(): bool
