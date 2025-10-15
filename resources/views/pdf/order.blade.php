@@ -1,203 +1,451 @@
 @php
-    $isRtl   = in_array(app()->getLocale(), ['ar','ar_SA','ar_EG','ar-LB']);
-    $cur     = $order->currency ?: 'USD';
-    $rate    = (float) ($order->exchange_rate ?? 1);
-    $orderNo = $order->uuid ?? ('TLO' . str_pad($order->id, 6, '0', STR_PAD_LEFT));
-    $custNo  = $order->customer?->uuid ?? null;
+    use Illuminate\Support\Str;
 
-    /**
-     * Resolve many kinds of "relative" paths to a local absolute path and prefix file://
-     * Accepts:
-     *   products/abc.jpg
-     *   storage/products/abc.jpg
-     *   /storage/products/abc.jpg
-     *   /img/abc.jpg (anything under public/)
-     */
-    $toLocalImg = function (?string $path) {
-        if (!$path) return null;
-        $path = trim($path);
+    // Locale & direction
+    $locale = app()->getLocale();
+    $isRtl  = ($locale === 'ar');
 
-        // Remote URLs? Don't fetch (avoid timeouts)
-        if (preg_match('~^https?://~i', $path)) return null;
+    // Money formatter: 1,234.56
+    $fmt = fn($v) => number_format((float) $v, 2, '.', ',');
 
-        // normalize leading slash
-        $trim = ltrim($path, '/');
-
-        // 1) storage disk ("public") e.g. products/abc.jpg
-        try {
-            $diskAbs = \Illuminate\Support\Facades\Storage::disk('public')->path($trim);
-            if (is_file($diskAbs)) return 'file://' . $diskAbs;
-        } catch (\Throwable $e) {}
-
-        // 2) /storage/... symlink (public/storage/...)
-        $maybe = public_path($trim);
-        if (is_file($maybe)) return 'file://' . $maybe;
-
-        if (str_starts_with($trim, 'storage/')) {
-            $maybe2 = public_path($trim); // public/storage/...
-            if (is_file($maybe2)) return 'file://' . $maybe2;
-        }
-
-        // 3) raw file under public
-        $pub = public_path($trim);
-        if (is_file($pub)) return 'file://' . $pub;
-
-        return null; // not found
+    // Percent formatter without trailing zeros
+    $fmtPct = function ($v) {
+        $s = number_format((float)$v, 2, '.', ',');
+        return rtrim(rtrim($s, '0'), '.');
     };
 
-    $logoLocal = isset($logoPath) && is_file($logoPath) ? ('file://' . $logoPath) : null;
+    // Build a Dompdf/mPDF-friendly local/public path for images
+    $toPath = function (?string $path) {
+        if (!$path) return null;
+        if (Str::startsWith($path, ['data:', 'http://', 'https://', '/', 'file://'])) return $path;
+        $relative = Str::startsWith($path, 'storage/') ? $path : ('storage/' . ltrim($path, '/'));
+        return public_path($relative);
+    };
+
+    // Business / branch
+    $companyName  = $company ?? config('app.name', 'Techno Lock Keys');
+    $companyAddr1 = $company_addr1 ?? 'Industrial Area 5, Maleha Street';
+    $companyAddr2 = $company_addr2 ?? 'United Arab Emirates – Sharjah';
+    $companyPhone = $company_phone ?? '(+971) 50 442 9045';
+    $companyEmail = $company_email ?? 'info@tlkeys.com';
+    $companyWeb   = $company_web   ?? 'www.tlkeys.com';
+
+    $branchCode   = $order->branch?->code ?? null;
+    $showCompanyBlock = ($branchCode === 'AE');  // 🔹 Only show company header/footer for AE
+
+    // Codes / dates
+    $docCode    = $order->code ?? ('TLO' . str_pad($order->id, 6, '0', STR_PAD_LEFT));
+    $docDate    = $order->created_at?->format('d.m.Y H:i');
+    $customerId = $order->customer?->code ?? ($order->customer_id ? ('TLK' . $order->customer_id) : '-');
+
+    // Money
+    $subtotal   = (float)($order->subtotal ?? 0);
+    $discount   = (float)($order->discount ?? 0);
+    $shipping   = (float)($order->shipping ?? 0);
+    $feesPct    = isset($order->service_fees_percent) ? (float)$order->service_fees_percent : 0;
+    $feesVal    = $feesPct ? round(($subtotal - $discount + $shipping) * ($feesPct/100), 2) : 0;
+    $grandTotal = (float)($order->total ?? ($subtotal - $discount + $shipping + $feesVal));
+    $paid       = (float)($order->paid_amount ?? 0);
+    $due        = max($grandTotal - $paid, 0);
+
+    // Customer
+    $customer   = $order->customer;
+    $custName   = $customer->name ?? '-';
+    $custEmail  = $customer->email ?? '';
+    $custPhone  = $customer->phone ?? '';
+    $custAddr   = trim(($customer->address ?? ''));
+    $custCity   = trim(($customer->city ?? ''));
+    $custCountry= trim(($customer->country ?? ''));
+    $custPostal = trim(($customer->postal_code ?? ''));
+
+    // Determine if customer block has meaningful data
+    $hasCustomerData = $customer && (
+        ($custName && $custName !== '-') ||
+        $custPhone || $custEmail || $custAddr || $custCity || $custCountry || $custPostal
+    );
+
+    // Status
+    $status       = strtolower((string)$order->payment_status);
+    $statusPretty = str_replace('_', ' ', $status); // translate as raw words
+
+    // Logo path
+    $logo       = !empty($logoPath) ? $toPath($logoPath) : null;
+    $brandColor = '#2D83B0';
+
+    // Hard-coded QR (optional)
+    $qr = file_exists(public_path('images/qr-code.png')) ? public_path('images/qr-code.png') : null;
+
+    // Helper to pick localized product title if it's an array: ['en' => ..., 'ar' => ...]
+    $pickTitle = function ($p, $fallback = '') use ($locale) {
+        $title = $fallback;
+        if (is_array($p?->title ?? null)) {
+            $title = $p->title[$locale] ?? $p->title['en'] ?? reset($p->title) ?? $fallback;
+        } else {
+            $title = $p->title ?? $fallback;
+        }
+        return $title;
+    };
 @endphp
-<!DOCTYPE html>
-<html lang="{{ app()->getLocale() }}" dir="{{ $isRtl ? 'rtl' : 'ltr' }}">
+
+<!doctype html>
+<html lang="{{ $locale }}" dir="{{ $isRtl ? 'rtl' : 'ltr' }}">
 <head>
     <meta charset="utf-8">
-    <title>{{ $orderNo }}</title>
+    <title>{{ $companyName }} - {{ __('Invoice') }} {{ $docCode }}</title>
     <style>
-        @page { margin: 16mm 14mm 20mm 14mm; }
-        body  { font-family: 'amiri', sans-serif; color:#111; font-size: 10.8pt; }
+        /* Use Amiri only for Arabic; otherwise DejaVu Sans */
+        @if ($isRtl)
+        * { font-family: Amiri, "DejaVu Sans", sans-serif; }
+        @else
+        * { font-family: "DejaVu Sans", sans-serif; }
+        @endif
 
-        .brand { font-size: 18pt; font-weight: 700; margin: 0 0 2mm; }
-        .muted { color:#6b7280; font-size: 9.5pt; }
+        .bidi { unicode-bidi: plaintext; }  /* keeps USD + numbers readable inside RTL */
 
-        /* Header row */
-        .hdr { width:100%; border-collapse: collapse; margin-bottom: 8mm; }
-        .hdr td { vertical-align: middle; }
-        .hdr .logo { text-align: {{ $isRtl ? 'left' : 'right' }}; }
-        .hdr .logo img { height: 44px; }
+        /* Make room for footer only when AE */
+        @if($showCompanyBlock)
+            @page { margin: 28px 28px 70px 28px; } /* bottom margin bigger for footer */
+        @else
+            @page { margin: 28px; }                /* no extra bottom space */
+        @endif
 
-        /* Card using table for reliability */
-        .card { width:100%; border:1px solid #e5e7eb; border-radius:8px; border-collapse: separate; border-spacing:0; }
-        .card td { padding:8px 10px; vertical-align: top; }
-        .card td + td { border-{{ $isRtl ? 'right' : 'left' }}:1px solid #e5e7eb; }
-        .title-sm { font-weight:700; margin-bottom:4px; }
+        body { font-size: 13px; color: #111; }
+        h1,h2,h3,h4 { margin: 0; }
+        .brand { color: {{ $brandColor }}; }
+        .muted { color: #666; }
+        .small { font-size: 10px; }
+        .xs { font-size: 9px; }
+
+        .header { width: 100%; box-sizing: border-box; }
+        .header::after { content:""; display:block; clear: both; }
+
+        .header .left  { float: left;  width: 60%; }
+        .header .right { float: right; width: 40%; text-align: right; }
+
+        /* RTL overrides */
+        [dir="rtl"] .header .left  { float: right; text-align: right; }
+        [dir="rtl"] .header .right { float: left;  text-align: left; }
+        [dir="rtl"] th, [dir="rtl"] td { text-align: right; }
+        [dir="rtl"] .qty { text-align: center; }
+        [dir="rtl"] .right { text-align: left !important; }
+
+        .logo { height: 36px; max-width: 100%; display:block; margin-bottom: 6px; }
+        .qr { width: 72px; height: 72px; object-fit: contain; display: inline-block; margin-top: 4px; margin-left: 8px; }
+
+        .rule { height: 2px; background: {{ $brandColor }}; opacity: .15; margin: 8px 0 14px; }
+
+        .panel {
+            border: 1.5px solid {{ $brandColor }};
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            background: #fff;
+            box-sizing: border-box;
+        }
+
+        .badge{
+            display: inline-block;
+            width: 25%;
+            float:right;
+            text-align:center;
+            white-space: nowrap;
+            padding: 3px 18px;
+            border-radius: 999px;
+            background: #eef2ff;
+            color: #374151;
+            border: 1px solid #e5e7eb;
+            font-size: 12px;
+            line-height: 1.2;
+        }
+        [dir="rtl"] .badge { float: left; }
+
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px 10px; border: 1px solid #e5e7eb; vertical-align: middle; }
+        th { background: #f8fafc; font-weight: 700; text-align: left; }
+        .sku { font-weight: 700; white-space: nowrap; }
+        .qty { text-align: center; width: 48px; }
+        .thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: inline-block; vertical-align: middle; } /* inline-block helps vertical centering */
+
+        .two-col { width: 100%; border: none; border-collapse: separate; table-layout: fixed; }
+        .two-col .col { width: 50%; }
+        .two-col .left-pad  { padding-right: 6px; }
+        .two-col .right-pad { padding-left: 6px; }
 
         /* Items table */
-        table.items { width:100%; border-collapse: collapse; margin-top: 10mm; }
-        table.items th, table.items td { border:1px solid #e5e7eb; padding: 7px 8px; vertical-align: middle; }
-        table.items thead th { background:#374151; color:#fff; font-weight:700; font-size:10pt; }
-        table.items tbody tr:nth-child(odd) { background:#fafafa; }
-        .center { text-align:center; }
-        .right  { text-align: {{ $isRtl ? 'left' : 'right' }}; }
-        .sku { color:#6b7280; font-size: 9.5pt; }
-        .prod-title { font-weight:700; }
+        table.items {
+            border: 1px solid #e5e7eb;
+            page-break-inside: auto;
+            margin-bottom: 12px;
+        }
+        table.items tr { page-break-inside: avoid; page-break-after: auto; }
 
-        /* Product image (small thumbnail) */
-        .pimg { width: 44px; height:44px; display:inline-block; border:1px solid #e5e7eb; border-radius:6px; background:#fff; }
-        .pimg img { max-width:44px; max-height:44px; width:auto; height:auto; object-fit:contain; display:block; }
+        /* >>> Ensure *true* vertical centering in the items grid (Dompdf-friendly) */
+        table.items th,
+        table.items td { vertical-align: middle !important; }
+        table.items td > * { vertical-align: middle; } /* inline children align in middle line box */
 
-        /* Totals */
-        .totals { width: 40%; margin-top:10mm; margin-{{ $isRtl ? 'right':'left' }}:auto; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; }
-        .totals td { border:0; padding:8px; }
-        .totals tr + tr td { border-top:1px solid #f1f5f9; }
-        .totals .label { color:#374151; }
-        .totals .value { font-weight:600; }
+        /* >>> Striped body rows (print-friendly subtle) */
+        table.items tbody tr:nth-child(even) td { background: #f3f7ff; }  /* very light */
+        table.items tbody tr:nth-child(odd) td { background: #ffffff; }
 
-        /* Footer page numbers */
-        htmlpagefooter[name=fo] { text-align:center; color:#6b7280; font-size:10pt; }
+        .keep-together { page-break-inside: avoid; }
+
+        /* === Totals box (updated styles) === */
+        .totalsbox {
+            width: 380px;
+            margin-left: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            overflow: hidden;
+            box-shadow: 0 2px 6px rgba(0,0,0,.04);
+            box-sizing: border-box;
+            margin-top: 6px;
+        }
+        .totalsbox table { width: 100%; border-collapse: collapse; }
+        .totalsbox td { padding: 9px 12px; border-bottom: 1px solid #eef2f7; }
+        .totalsbox tr:last-child td { border-bottom: 0; }
+
+        .totalsbox .label { color: #374151; }
+        .totalsbox .val   { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        [dir="rtl"] .totalsbox .val { text-align: left; }
+
+        /* Shipping in green */
+        .totalsbox .shipping .label { color: #047857; }
+        .totalsbox .shipping .val   { color: #059669; font-weight: 700; }
+
+        /* Service fees subtle */
+        .totalsbox .fees .label { color: #475569; }
+        .totalsbox .fees .val   { color: #334155; }
+
+        /* Discount muted red */
+        .totalsbox .discount .label { color: #9f1239; }
+        .totalsbox .discount .val   { color: #be123c; }
+
+        /* Grand total highlighted in red row */
+        .totalsbox .grand td { background: #fee2e2; }
+        .totalsbox .grand .label { color: #991b1b; font-weight: 800; }
+        .totalsbox .grand .val   { color: #dc2626; font-weight: 800; font-size: 14px; }
+
+        /* Due (if present) as attention row */
+        .totalsbox .due td { background: #fef3c7; }
+        .totalsbox .due .label { color: #92400e; font-weight: 700; }
+        .totalsbox .due .val   { color: #b45309; font-weight: 800; }
+
+        /* === Footer (only rendered for AE below) === */
+        .footer {
+            position: fixed;
+            left: 0; right: 0;
+            bottom: -2px;                 /* Dompdf: keep inside bottom margin */
+            height: 54px;
+            border-top: 1px solid #e5e7eb;
+            padding: 6px 12px 0 12px;
+            font-size: 10px;
+            color: #6b7280;
+        }
+        .footer .left { float: left; }
+        .footer .right { float: right; text-align: right; }
+        [dir="rtl"] .footer .left { float: right; text-align: right; }
+        [dir="rtl"] .footer .right { float: left; text-align: left; }
     </style>
 </head>
 <body>
+    <div class="header">
+        <div class="left">
+            @if($showCompanyBlock)
+                @if($logo)
+                    <img class="logo" src="{{ $logo }}" alt="{{ __('Logo') }}">
+                @endif
+                <h2 class="brand">{{ $companyName }}</h2>
+                <div class="muted">
+                    {{ $companyAddr1 }} <br>
+                    {{ $companyAddr2 }} <br>
+                    {{ __('Tel') }}: {{ $companyPhone }} <br>
+                    {{ __('Email') }}: {{ $companyEmail }}
+                </div>
+            @endif
+        </div>
+        <div class="right">
+            <div><b>{{ __('Date') }}: {{ $docDate }}</b></div>
+            <div><b>{{ __('Order Number') }}: #{{ $docCode }}</b></div>
+            <div><b>{{ __('Customer ID') }}: {{ $customerId }}</b></div>
+            @if($statusPretty)
+                <div class="badge" style="margin-top:6px;">{{ __($statusPretty) }}</div>
+            @endif
+        </div>
+    </div>
 
-<htmlpagefooter name="fo">
-    {{ __('Page') }} {PAGENO} {{ __('of') }} {nb}
-</htmlpagefooter>
-<sethtmlpagefooter name="fo" value="on" />
+    <div class="rule"></div>
 
-<table class="hdr">
-    <tr>
-        <td>
-            <div class="brand">{{ $company ?? 'Your Company' }}</div>
-            <div class="muted">
-                <strong>{{ __('Order Number') }}:</strong> {{ $orderNo }}
-                @if($custNo) &nbsp;|&nbsp; <strong>{{ __('Customer #') }}:</strong> {{ $custNo }} @endif
-                &nbsp;|&nbsp; <strong>{{ __('Date') }}:</strong> {{ $order->created_at?->format('Y-m-d') }}
-            </div>
-        </td>
-        <td class="logo">
-            @if($logoLocal)<img src="{{ $logoLocal }}" alt="Logo">@endif
-        </td>
-    </tr>
-</table>
-
-<table class="card">
-    <tr>
-        <td style="width:50%;">
-            <div class="title-sm">{{ __('Customer Details') }}</div>
-            <div>{{ $order->customer?->name }}</div>
-            @if($order->customer?->address)<div>{{ $order->customer->address }}</div>@endif
-            @if($order->customer?->phone)<div>{{ $order->customer->phone }}</div>@endif
-            @if($order->customer?->email)<div>{{ $order->customer->email }}</div>@endif
-        </td>
-        <td style="width:50%;">
-            <div class="title-sm">{{ __('Seller / Order Info') }}</div>
-            <div><strong>{{ __('Seller') }}:</strong> {{ $order->seller?->name }}</div>
-            <div><strong>{{ __('Branch') }}:</strong> {{ $order->branch?->name ?? $order->branch?->code }}</div>
-            <div><strong>{{ __('Currency') }}:</strong> {{ $cur }} &nbsp;|&nbsp; <strong>{{ __('Rate') }}:</strong> {{ number_format($rate, 6) }}</div>
-            <div><strong>{{ __('Type') }}:</strong> {{ ucfirst($order->type) }}</div>
-            <div><strong>{{ __('Status') }}:</strong> {{ str_replace('_',' ', ucfirst($order->status)) }}</div>
-        </td>
-    </tr>
-</table>
-
-{{-- …header + info card as in my previous reply… --}}
-
-<table class="items">
-    <thead>
-    <tr>
-        <th class="center" style="width:28px;">#</th>
-        <th class="center" style="width:56px;">{{ __('Image') }}</th>
-        <th style="width:110px;">SKU</th>
-        <th>{{ __('Product') }}</th>
-        <th class="center" style="width:70px;">{{ __('Qty') }}</th>
-        <th class="right"  style="width:95px;">{{ __('Unit Price') }} ({{ $order->currency ?? 'USD' }})</th>
-        <th class="right"  style="width:110px;">{{ __('Line Total') }} ({{ $order->currency ?? 'USD' }})</th>
-    </tr>
-    </thead>
-    <tbody>
-    @foreach($order->items as $i => $item)
-        @php
-            $title = $item->product?->title;
-            if (is_array($title)) $title = $title[app()->getLocale()] ?? ($title['en'] ?? reset($title));
-            $title = $title ?? $item->product?->sku ?? __('Product');
-            $src   = $imgMap[$item->product_id] ?? null;
-        @endphp
+    {{-- Customer block shown only if a user/customer is actually selected / has data --}}
+    @if($hasCustomerData)
+    <table class="two-col" style="margin-bottom:12px;">
         <tr>
-            <td class="center">{{ $i + 1 }}</td>
-            <td class="center">
-                <span class="pimg">
-                    @if($src)<img src="{{ $src }}" alt="prod">@endif
-                </span>
+            <td class="col left-pad">
+                <div>
+                    <span class="brand">{{ __('Customer Information') }}</span><br><br>
+                    <table style="width: 100%; border-collapse: separate;">
+                        @if($custName && $custName !== '-')
+                        <tr>
+                            <td style="border:none; padding: 0 6px 2px 0;"><strong>{{ __('Name') }}:</strong></td>
+                            <td style="border:none; padding: 0 0 2px 0;">{{ $custName }}</td>
+                        </tr>
+                        @endif
+
+                        @if($custPhone)
+                        <tr>
+                            <td style="border:none; padding: 0 6px 0 0;"><strong>{{ __('Phone') }}:</strong></td>
+                            <td style="border:none; padding: 0;">{{ $custPhone }}</td>
+                        </tr>
+                        @endif
+
+                        @if($custEmail)
+                        <tr>
+                            <td style="border:none; padding: 0 6px 0 0;"><strong>{{ __('Email') }}:</strong></td>
+                            <td style="border:none; padding: 0;">{{ $custEmail }}</td>
+                        </tr>
+                        @endif
+
+                        @if($custAddr || $custCity || $custCountry || $custPostal)
+                        <tr>
+                            <td style="border:none; padding: 0 6px 0 0;"><strong>{{ __('Address') }}:</strong></td>
+                            <td style="border:none; padding: 0;">
+                                {{ $custAddr }}
+                                @if($custCity), {{ $custCity }}@endif
+                                @if($custCountry), {{ $custCountry }}@endif
+                                @if($custPostal), {{ $custPostal }}@endif
+                            </td>
+                        </tr>
+                        @endif
+                    </table>
+                </div>
             </td>
-            <td><span class="sku">{{ $item->product?->sku }}</span></td>
-            <td><div class="prod-title">{{ $title }}</div></td>
-            <td class="center">{{ rtrim(rtrim(number_format((float)$item->qty, 2, '.', ''), '0'), '.') }}</td>
-            <td class="right">{{ number_format((float)$item->unit_price * (float)($order->exchange_rate ?? 1), 2) }}</td>
-            <td class="right">{{ number_format((float)$item->line_total * (float)($order->exchange_rate ?? 1), 2) }}</td>
-        </tr>
-    @endforeach
-    </tbody>
-</table>
-
-<div class="totals">
-    <table>
-        <tr>
-            <td class="label right">{{ __('Sub total') }} ({{ $cur }})</td>
-            <td class="value right">{{ number_format((float)$order->subtotal * $rate, 2) }}</td>
-        </tr>
-        <tr>
-            <td class="label right">{{ __('Discount') }} ({{ $cur }})</td>
-            <td class="value right">{{ number_format((float)$order->discount * $rate, 2) }}</td>
-        </tr>
-        <tr>
-            <td class="label right">{{ __('Shipping') }} ({{ $cur }})</td>
-            <td class="value right">{{ number_format((float)$order->shipping * $rate, 2) }}</td>
-        </tr>
-        <tr>
-            <td class="label right"><strong>{{ __('Total') }} ({{ $cur }})</strong></td>
-            <td class="value right"><strong>{{ number_format((float)$order->total * $rate, 2) }}</strong></td>
         </tr>
     </table>
-</div>
+    @endif
 
+    <h4 class="brand" style="margin: 10px 0 6px;">{{ __('Items') }}</h4>
+    <table class="items">
+        <thead>
+            <tr>
+                <th style="width:32px; text-align:center;">#</th>
+                <th style="width:64px;">{{ __('Image') }}</th>
+                <th>{{ __('Product') }}</th>
+                <th class="sku">{{ __('SKU') }}</th>
+                <th class="qty">{{ __('Qty') }}</th>
+                <th class="right">{{ __('Unit Price') }}</th>
+                <th class="right">{{ __('Total') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach($order->items as $i => $row)
+                @php
+                    $p     = $row->product;
+                    $sku   = $p->sku ?? ($row->sku ?? '-');
+                    $src   = $imgMap[$row->product_id] ?? null;
+                    $title = $pickTitle($p, $row->title ?? '');
+                    $line  = $row->line_total ?? ($row->qty * $row->unit_price);
+                @endphp
+                <tr>
+                    <td style="text-align:center;">{{ $i + 1 }}</td>
+                    <td>
+                        @if($src && $toPath($src))
+                            <img class="thumb" src="{{ $toPath($src) }}" alt="{{ $title }}">
+                        @endif
+                    </td>
+                    <td><div style="font-weight:600; margin-bottom:2px;">{{ $title }}</div></td>
+                    <td class="sku">{{ $sku ?: '—' }}</td>
+                    <td class="qty">{{ (int)$row->qty }}</td>
+                    <td class="right"><span class="">{{ $order->currency ?? 'USD' }} {{ $fmt($row->unit_price) }}</span></td>
+                    <td class="right"><span class="">{{ $order->currency ?? 'USD' }} {{ $fmt($line) }}</span></td>
+                </tr>
+            @endforeach
+        </tbody>
+    </table>
+
+    {{-- === Totals box (colored) === --}}
+    <div class="totalsbox keep-together">
+        <table>
+            <tr>
+                <td class="label">{{ __('Subtotal') }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($subtotal) }}</span></td>
+            </tr>
+
+            @if($discount > 0)
+            <tr class="discount">
+                <td class="label">{{ __('Discount') }}</td>
+                <td class="val">− <span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($discount) }}</span></td>
+            </tr>
+            @endif
+
+            <tr class="shipping">
+                <td class="label">{{ __('Shipping') }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($shipping) }}</span></td>
+            </tr>
+
+            @if($feesPct > 0)
+            <tr class="fees">
+                <td class="label">{{ __('Service Fees (:pct%)', ['pct' => $fmtPct($feesPct)]) }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($feesVal) }}</span></td>
+            </tr>
+            @endif
+
+            <tr class="grand">
+                <td class="label">{{ __('Total') }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($grandTotal) }}</span></td>
+            </tr>
+
+            @if($paid > 0)
+            <tr>
+                <td class="label">{{ __('Paid') }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($paid) }}</span></td>
+            </tr>
+            <tr class="due">
+                <td class="label">{{ __('Due') }}</td>
+                <td class="val"><span class="bidi">{{ $order->currency ?? 'USD' }} {{ $fmt($due) }}</span></td>
+            </tr>
+            @endif
+        </table>
+    </div>
+
+    {{-- === Persistent footer content (company info) — only for AE === --}}
+    @if($showCompanyBlock)
+    <div class="footer">
+        <div class="left">
+            <strong>{{ $companyName }}</strong> — {{ $companyAddr1 }}, {{ $companyAddr2 }}
+        </div>
+        <div class="right">
+            {{ $companyWeb }} • {{ $companyEmail }} • {{ $companyPhone }}
+        </div>
+    </div>
+    @endif
+
+    {{-- === Page numbers (Dompdf canvas) === --}}
+    <script type="text/php">
+        if (isset($pdf)) {
+            $font = $fontMetrics->getFont("DejaVu Sans", "normal");
+            $size = 9;
+
+            // Centered "Page X of Y"
+            $text = "{{ __('Page :n of :c') }}";
+            $text = str_replace([':n', ':c'], ['{PAGE_NUM}', '{PAGE_COUNT}'], $text);
+
+            $w = $fontMetrics->get_text_width($text, $font, $size);
+            $x = 297 - ($w / 2); // ~A4 width 595pt / 2 ≈ 297
+
+            // Put numbers a bit higher if there's no footer bar
+            $y = {{ $showCompanyBlock ? 825 : 812 }};
+
+            // Left footer label: document code
+            $leftText = "{{ $docCode }}";
+            $pdf->page_text(28, $y, $leftText, $font, $size, [0.45,0.45,0.45]);
+
+            // Right footer label: date
+            $rightText = "{{ $docDate }}";
+            $pdf->page_text(530, $y, $rightText, $font, $size, [0.45,0.45,0.45]);
+
+            // Centered page counter
+            $pdf->page_text($x, $y, $text, $font, $size, [0.35,0.35,0.35]);
+        }
+    </script>
 </body>
 </html>

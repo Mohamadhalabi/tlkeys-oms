@@ -1,38 +1,29 @@
 <?php
 
 return [
-    // mPDF base
-    'mode'         => 'utf-8',
-    'format'       => 'A4',
-    'orientation'  => 'P',
-    'default_font' => 'amiri', // Arabic-friendly default
+    'mode'                  => 'utf-8',
+    'format'                => 'A4',
+    'orientation'           => 'P',
+    'default_font_size'     => '12',
+    'default_font'          => 'amiri',   // <- use our Arabic font
+    'margin_left'           => 14,
+    'margin_right'          => 14,
+    'margin_top'            => 16,
+    'margin_bottom'         => 20,
 
-    // Where your .ttf files live (put them here)
-    'font_path'    => public_path('fonts'),
-    'font_data'    => [
-        // Amiri family (recommended for Arabic)
+    'custom_font_dir'       => resource_path('fonts/Amiri/'), // <- where TTFs live
+    'custom_font_data'      => [
         'amiri' => [
             'R'  => 'Amiri-Regular.ttf',
             'B'  => 'Amiri-Bold.ttf',
             'I'  => 'Amiri-Italic.ttf',
             'BI' => 'Amiri-BoldItalic.ttf',
         ],
-
-        // (Optional) Cairo if you add it later
-        // 'cairo' => [
-        //     'R'  => 'Cairo-Regular.ttf',
-        //     'B'  => 'Cairo-Bold.ttf',
-        //     'I'  => 'Cairo-Italic.ttf',
-        //     'BI' => 'Cairo-BoldItalic.ttf',
-        // ],
     ],
 
-    // tmp & rendering
-    'temp_dir'     => storage_path('app/mpdf'),
-    'dpi'          => 96,
-    'img_dpi'      => 96,
-
-    // SAFETY: never let mPDF fetch remote URLs (prevents timeouts)
-    'enable_remote' => false,
-    'enable_php'    => false,
+    // Critical for Arabic shaping:
+    'autoScriptToLang'      => true,
+    'autoLangToFont'        => true,
+    'useOTL'                => 0xFF,   // enable OpenType layout (joins letters)
+    'useKashida'            => 75,     // nicer justification in Arabic
 ];

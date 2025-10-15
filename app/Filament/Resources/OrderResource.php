@@ -4,6 +4,7 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\OrderResource\Pages;
+use App\Filament\Resources\OrderResource\RelationManagers\PaymentsRelationManager;
 use App\Models\Branch;
 use App\Models\Customer;
 use App\Models\CurrencyRate;
@@ -19,7 +20,6 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
 use Filament\Notifications\Notification;
-use App\Filament\Resources\OrderResource\RelationManagers\PaymentsRelationManager;
 
 class OrderResource extends \Filament\Resources\Resource
 {
@@ -40,6 +40,36 @@ class OrderResource extends \Filament\Resources\Resource
         $canSeeCost       = (bool) (($user?->can_see_cost ?? false) || $user?->hasRole('admin'));
         $canSellBelowCost = (bool) (($user?->can_sell_below_cost ?? false) || $user?->hasRole('admin'));
 
+        // force 2 decimals everywhere we compute
+        $r2 = fn ($v) => round((float) $v, 2);
+
+        $applyCurrency = function (string $cur, Forms\Get $get, Forms\Set $set) use ($r2) {
+            // Set currency
+            $set('currency', $cur);
+
+            // Get rate, default to 1 if missing
+            $rate = (float) \App\Models\CurrencyRate::getRate($cur ?: 'USD');
+            if ($rate <= 0) { $rate = 1; }
+
+            // Persist exchange rate + top-level local amounts
+            $set('exchange_rate', $rate);
+            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
+            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
+
+            // Recompute each item's local fields
+            foreach (array_keys((array)($get('items') ?? [])) as $i) {
+                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
+                $qty     = (float) ($get("items.$i.qty") ?? 0);
+                $usdLine = (float) ($get("items.$i.line_total") ?? ($qty * $usdUnit));
+
+                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
+                $set("items.$i.line_total_local", $r2($usdLine * $rate));
+                $set("items.$i.__currency_mirror", microtime(true));
+            }
+        };
+
+
+
         $titleFor = function (Product $p, string $locale): string {
             if (method_exists($p, 'getTranslation')) {
                 try {
@@ -53,18 +83,18 @@ class OrderResource extends \Filament\Resources\Resource
             return (string) ($p->title ?? '');
         };
 
-        $compute = function (array $items, float $discountUsd, float $shippingUsd, float $rate): array {
-            $subtotalUsd = collect($items)->sum(function ($row) {
+        $compute = function (array $items, float $discountUsd, float $shippingUsd, float $rate) use ($r2): array {
+            $subtotalUsd = $r2(collect($items)->sum(function ($row) {
                 $qty  = (float)($row['qty'] ?? 0);
                 $unit = (float)($row['unit_price'] ?? 0);
                 return $qty * $unit;
-            });
-            $totalUsd = max(0, $subtotalUsd - $discountUsd + $shippingUsd);
+            }));
+            $totalUsd = $r2(max(0, $subtotalUsd - $r2($discountUsd) + $r2($shippingUsd)));
             return [
                 'subtotal_usd' => $subtotalUsd,
                 'total_usd'    => $totalUsd,
-                'subtotal_fx'  => $subtotalUsd * $rate,
-                'total_fx'     => $totalUsd * $rate,
+                'subtotal_fx'  => $r2($subtotalUsd * $rate),
+                'total_fx'     => $r2($totalUsd * $rate),
             ];
         };
 
@@ -87,36 +117,37 @@ class OrderResource extends \Filament\Resources\Resource
                         ->label(__('Currency'))
                         ->options(function () {
                             $opts = CurrencyRate::options();
-                            return ['USD' => 'US Dollar'] + $opts;
+                            return ['USD' => __('US Dollar')] + $opts;
                         })
                         ->default('USD')
                         ->reactive()
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
-                            $rate = CurrencyRate::getRate($state ?: 'USD');
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
+                            $rate = (float) CurrencyRate::getRate($state ?: 'USD');
                             $set('exchange_rate', $rate);
-                            $set('discount_local', ((float)($get('discount') ?? 0)) * $rate);
-                            $set('shipping_local', ((float)($get('shipping') ?? 0)) * $rate);
+                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
+                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
                                 $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
-                                $set("items.$i.unit_price_local", $usdUnit * $rate);
-                                $set("items.$i.line_total_local", $usdLine * $rate);
+                                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
+                                $set("items.$i.line_total_local", $r2($usdLine * $rate));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
-                            $rate = CurrencyRate::getRate($state ?: 'USD');
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
+                            $rate = (float) CurrencyRate::getRate($state ?: 'USD');
                             $set('exchange_rate', $rate);
-                            $set('discount_local', ((float)($get('discount') ?? 0)) * $rate);
-                            $set('shipping_local', ((float)($get('shipping') ?? 0)) * $rate);
+                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
+                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
                                 $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
-                                $set("items.$i.unit_price_local", $usdUnit * $rate);
-                                $set("items.$i.line_total_local", $usdLine * $rate);
+                                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
+                                $set("items.$i.line_total_local", $r2($usdLine * $rate));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
-                        }),
+                        })
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
                     Forms\Components\Hidden::make('exchange_rate')
                         ->default(fn (Forms\Get $get) => CurrencyRate::getRate($get('currency') ?: 'USD'))
@@ -129,7 +160,8 @@ class OrderResource extends \Filament\Resources\Resource
                         ->disabled(fn () => $user->hasRole('seller'))
                         ->required()
                         ->reactive()
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($applyCurrency) {
+                            // keep your stock-mirroring behavior
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $set("items.$i.__branch_mirror", (int) $state);
                                 $pid = (int) ($get("items.$i.product_id") ?? 0);
@@ -139,8 +171,25 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set("items.$i.stock_in_branch", is_null($stock) ? null : (int) $stock);
                                 }
                             }
+
+                            // >>> NEW: on load, if branch code is SA, force SAR
+                            if ($state) {
+                                $code = optional(Branch::find((int)$state))->code;
+                                if ($code === 'SA') {
+                                    $applyCurrency('SAR', $get, $set);
+                                }
+                            }
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($applyCurrency) {
+                            // >>> NEW: when branch changes to SA, force SAR
+                            if ($state) {
+                                $code = optional(Branch::find((int)$state))->code;
+                                if ($code === 'SA') {
+                                    $applyCurrency('SAR', $get, $set);
+                                }
+                            }
+
+                            // keep your stock-mirroring behavior
                             $items = (array) ($get('items') ?? []);
                             foreach (array_keys($items) as $i) {
                                 $set("items.$i.__branch_mirror", (int) $state);
@@ -153,15 +202,22 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set("items.$i.stock_in_branch", null);
                                 }
                             }
-                        }),
+                        })
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
-                    // Type first so conditional 'required' works
+
                     Forms\Components\Select::make('type')
                         ->label(__('Type'))
-                        ->options(['proforma' => __('Proforma'), 'order' => __('Order')])
+                        ->options([
+                            'proforma' => __('Proforma'),
+                            'order' => __('Order'),
+                        ])
                         ->default('proforma')
                         ->required()
-                        ->reactive(),
+                        ->reactive()
+                        // once converted to order, we cannot go back to proforma
+                        ->disabled(fn (Forms\Get $get, $record) => $record && $record->type === 'order')
+                        ->columnSpan(['sm' => 2, 'md' => 1, 'lg' => 1]),
 
                     Forms\Components\Select::make('customer_id')
                         ->label(__('Customer'))
@@ -174,8 +230,13 @@ class OrderResource extends \Filament\Resources\Resource
                         })
                         ->searchable()
                         ->preload()
-                        ->required(fn (Forms\Get $get) => $get('type') === 'order')
                         ->reactive()
+                        ->required(fn (Forms\Get $get) => $get('type') === 'order')
+                        ->rule(function (Forms\Get $get) {
+                            return $get('type') === 'order'
+                                ? ['required', 'exists:customers,id']
+                                : ['nullable'];
+                        })
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $set("items.$i.__customer_mirror", (int) $state);
@@ -190,9 +251,9 @@ class OrderResource extends \Filament\Resources\Resource
                         ->createOptionUsing(function (array $data) use ($user) {
                             if ($user?->hasRole('seller')) $data['seller_id'] = $user->id;
                             return Customer::create($data)->id;
-                        }),
+                        })
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
-                    // Payment status (only on real orders)
                     Forms\Components\Select::make('payment_status')
                         ->label(__('Payment status'))
                         ->options([
@@ -205,13 +266,14 @@ class OrderResource extends \Filament\Resources\Resource
                         ->visible(fn (Forms\Get $get) => $get('type') === 'order')
                         ->dehydrated(fn (Forms\Get $get) => $get('type') === 'order')
                         ->required(fn (Forms\Get $get) => $get('type') === 'order')
-                        ->reactive(),
+                        ->reactive()
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
-                    // Paid amount (USD) – required only when "Partially paid"
                     Forms\Components\TextInput::make('paid_amount')
                         ->label(__('Paid amount (USD)'))
                         ->numeric()
                         ->step('0.01')
+                        ->rule('decimal:0,2')
                         ->minValue(0)
                         ->visible(fn (Forms\Get $get) =>
                             $get('type') === 'order' && $get('payment_status') === 'partially_paid'
@@ -219,33 +281,29 @@ class OrderResource extends \Filament\Resources\Resource
                         ->required(fn (Forms\Get $get) =>
                             $get('type') === 'order' && $get('payment_status') === 'partially_paid'
                         )
-                        // IMPORTANT: validate against a freshly computed total, not the hidden `total` field.
-                        ->rule(fn (Forms\Get $get) => function (string $attribute, $value, \Closure $fail) use ($get) {
-                            if ($get('payment_status') !== 'partially_paid') {
-                                return;
-                            }
-
-                            // Recompute the USD total from current form state
+                        ->live(onBlur: true)
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
+                            $set('paid_amount', $r2($state));
+                        })
+                        ->rule(fn (Forms\Get $get) => function (string $attribute, $value, \Closure $fail) use ($get, $r2) {
+                            if ($get('payment_status') !== 'partially_paid') return;
                             $items = (array) ($get('items') ?? []);
-                            $subtotal = collect($items)->sum(function ($row) {
+                            $subtotal = $r2(collect($items)->sum(function ($row) {
                                 $qty  = (float)($row['qty'] ?? 0);
-                                $unit = (float)($row['unit_price'] ?? 0); // unit_price is always USD in this form
+                                $unit = (float)($row['unit_price'] ?? 0);
                                 return $qty * $unit;
-                            });
-
-                            $discount = (float) ($get('discount') ?? 0);
-                            $shipping = (float) ($get('shipping') ?? 0);
-                            $total = max(0.0, $subtotal - $discount + $shipping);
-
+                            }));
+                            $discount = $r2((float) ($get('discount') ?? 0));
+                            $shipping = $r2((float) ($get('shipping') ?? 0));
+                            $total = $r2(max(0.0, $subtotal - $discount + $shipping));
                             if ((float)$value > $total + 0.00001) {
                                 $fail(__('The paid amount must be less than or equal to the order total (:total USD).', [
                                     'total' => number_format($total, 2),
                                 ]));
                             }
                         })
-                        // Don’t persist a value when not needed
-                        ->dehydrated(fn (Forms\Get $get) => $get('payment_status') === 'partially_paid'),
-
+                        ->dehydrated(fn (Forms\Get $get) => $get('payment_status') === 'partially_paid')
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
                     Forms\Components\Select::make('status')
                         ->label(__('Order status'))
@@ -261,19 +319,23 @@ class OrderResource extends \Filament\Resources\Resource
                         ])
                         ->default('pending')
                         ->visible(fn (Forms\Get $get) => $get('type') === 'order')
-                        ->dehydrated(fn (Forms\Get $get) => $get('type') === 'order'),
+                        ->dehydrated(fn (Forms\Get $get) => $get('type') === 'order')
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
 
                     Forms\Components\TextInput::make('margin_percent')
                         ->label(__('Margin % over cost (optional)'))
                         ->numeric()->minValue(0)->step('0.01')
-                        ->reactive()
+                        ->rule('decimal:0,2')
+                        ->live(onBlur: true)
                         ->visible(fn () => (auth()->user()?->hasRole('admin') ?? false) || (auth()->user()?->can_see_cost ?? false))
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($canSellBelowCost, $canSeeCost) {
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($canSellBelowCost, $canSeeCost, $r2) {
                             $items = (array) ($get('items') ?? []);
                             if (empty($items)) return;
 
                             $rate = (float) ($get('exchange_rate') ?? 1);
                             if ($rate <= 0) $rate = 1;
+
+                            $margin = $r2($state ?? 0);
 
                             foreach (array_keys($items) as $i) {
                                 $pid = (int) ($get("items.$i.product_id") ?? 0);
@@ -283,15 +345,15 @@ class OrderResource extends \Filament\Resources\Resource
                                 $cost    = (float) ($get("items.$i.cost_price") ?? ($product?->cost_price ?? 0));
                                 $qty     = (float) ($get("items.$i.qty") ?? 1);
 
-                                $margin = (float) ($state ?? 0);
+                                $usd = (float) ($product?->sale_price ?? $product?->price ?? 0);
                                 if ($margin > 0 && $cost > 0) {
-                                    $usd = round($cost * (1 + $margin / 100), 2);
+                                    $usd = $r2($cost * (1 + $margin / 100));
                                 } else {
-                                    $usd = (float) ($product?->sale_price ?? $product?->price ?? 0);
+                                    $usd = $r2($usd);
                                 }
 
                                 if (!$canSellBelowCost && $cost > 0 && $usd < $cost) {
-                                    $usd = $cost;
+                                    $usd = $r2($cost);
                                     $msg = $canSeeCost
                                         ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
                                         : __('Unit price raised to the minimum allowed.');
@@ -299,19 +361,26 @@ class OrderResource extends \Filament\Resources\Resource
                                 }
 
                                 $set("items.$i.unit_price", $usd);
-                                $set("items.$i.unit_price_local", $usd * $rate);
-                                $set("items.$i.line_total", $qty * $usd);
-                                $set("items.$i.line_total_local", $qty * $usd * $rate);
+                                $set("items.$i.unit_price_local", $r2($usd * $rate));
+                                $set("items.$i.line_total", $r2($qty * $usd));
+                                $set("items.$i.line_total_local", $r2($qty * $usd * $rate));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
 
                             $itemsNow = (array) ($get('items') ?? []);
-                            $subtotalUsd = collect($itemsNow)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0));
-                            $totalUsd    = max(0, $subtotalUsd - (float)($get('discount') ?? 0) + (float)($get('shipping') ?? 0));
+                            $subtotalUsd = $r2(collect($itemsNow)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $totalUsd    = $r2(max(0, $subtotalUsd - (float)$get('discount') + (float)$get('shipping')));
                             $set('subtotal', $subtotalUsd);
                             $set('total', $totalUsd);
-                        }),
-                ])->columns(5),
+                        })
+                        ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
+                ])
+                ->columns([
+                    'default' => 1,
+                    'sm' => 2,
+                    'md' => 3,
+                    'lg' => 5,
+                ]),
 
             Forms\Components\Section::make(__('Items'))
                 ->schema([
@@ -319,9 +388,46 @@ class OrderResource extends \Filament\Resources\Resource
                         ->label(__('Items'))
                         ->addActionLabel(__('Add item'))
                         ->relationship()
-                        ->columns(12)
                         ->live(debounce: 250)
+                        ->reorderable()
+                        ->orderColumn('sort')
+                        ->afterStateHydrated(function (?array $state, Forms\Get $get, Forms\Set $set) {
+                            $items = (array)($state ?? $get('items') ?? []);
+                            $idx = 1;
+                            foreach ($items as $key => $_row) {
+                                $set("items.$key.__index", $idx++);
+                            }
+                        })
+                        ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals) {
+                            $items = (array)($state ?? $get('items') ?? []);
+                            $idx = 1;
+                            foreach ($items as $key => $_row) {
+                                $set("items.$key.__index", $idx++);
+                            }
+
+                            $rate = (float) ($get('../../exchange_rate') ?? 1);
+                            $t = $compute(
+                                (array) ($get('../../items') ?? $state ?? []),
+                                (float) ($get('../../discount') ?? 0),
+                                (float) ($get('../../shipping') ?? 0),
+                                $rate
+                            );
+                            $setNestedTotals($set, $t);
+                        })
+                        ->columns([
+                            'default' => 1,
+                            'sm' => 6,
+                            'md' => 8,
+                            'lg' => 12,
+                        ])
                         ->schema([
+                            Forms\Components\TextInput::make('__index')
+                                ->label('#')
+                                ->disabled()
+                                ->dehydrated(false)
+                                ->extraAttributes(['class' => 'text-center font-semibold w-10'])
+                                ->columnSpan(['default' => 1, 'sm' => 1, 'md' => 1, 'lg' => 1]),
+
                             Forms\Components\Placeholder::make('product_image')
                                 ->label('')
                                 ->content(function (Forms\Get $get) use ($fallbackImg, $locale, $titleFor) {
@@ -341,24 +447,26 @@ class OrderResource extends \Filament\Resources\Resource
                                         }
                                     }
                                     return new HtmlString(
-                                        '<img src="'.e($url).'" alt="'.e($alt).'" style="width:60px;height:60px;object-fit:contain;border-radius:6px;border:1px solid #ddd;" />'
+                                        '<img src="'.e($url).'" alt="'.e($alt).'" class="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 object-contain rounded-md border border-gray-200" />'
                                     );
                                 })
                                 ->disableLabel()
-                                ->extraAttributes(['class' => 'pt-6'])
-                                ->columnSpan(['default' => 12, 'lg' => 1]),
+                                ->extraAttributes(['class' => 'pt-4 sm:pt-5'])
+                                ->columnSpan(['default' => 1, 'sm' => 1, 'md' => 1, 'lg' => 1]),
 
                             Forms\Components\Hidden::make('__customer_mirror')->dehydrated(false)->reactive(),
                             Forms\Components\Hidden::make('__branch_mirror')->dehydrated(false)->reactive(),
                             Forms\Components\Hidden::make('__currency_mirror')->dehydrated(false)->reactive(),
                             Forms\Components\Hidden::make('stock_in_branch')->dehydrated(false),
 
+                            Forms\Components\Hidden::make('sort')->dehydrated(true),
+
                             Forms\Components\Hidden::make('cost_price')
                                 ->dehydrated(false)
                                 ->reactive()
-                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                                     if ($state === null && $pid = (int) $get('product_id')) {
-                                        $set('cost_price', (float) (Product::find($pid)?->cost_price ?? 0));
+                                        $set('cost_price', $r2(Product::find($pid)?->cost_price ?? 0));
                                     }
                                 }),
 
@@ -390,8 +498,8 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->preload()
                                 ->required()
                                 ->reactive()
-                                ->columnSpan(['default' => 12, 'lg' => 5])
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost) {
+                                ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 5])
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $r2) {
                                     if ($state) {
                                         $items = collect($get('../../items') ?? []);
                                         $dups  = $items->pluck('product_id')->filter()->countBy();
@@ -424,15 +532,17 @@ class OrderResource extends \Filament\Resources\Resource
                                     }
                                     $stock = is_null($stock) ? null : (int)$stock;
                                     $set('stock_in_branch', $stock);
-                                    $set('cost_price', $cost);
+                                    $set('cost_price', $r2($cost));
 
                                     $margin = (float) ($get('../../margin_percent') ?? 0);
                                     if ($margin > 0 && $cost > 0) {
-                                        $price = round($cost * (1 + $margin / 100), 2);
+                                        $price = $r2($cost * (1 + $margin / 100));
+                                    } else {
+                                        $price = $r2($price);
                                     }
 
                                     if (!$canSellBelowCost && $cost > 0 && $price < $cost) {
-                                        $price = $cost;
+                                        $price = $r2($cost);
                                         $msg = $canSeeCost
                                             ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
                                             : __('Unit price raised to the minimum allowed.');
@@ -443,9 +553,9 @@ class OrderResource extends \Filament\Resources\Resource
                                     if ($rate <= 0) $rate = 1;
 
                                     $set('unit_price', $price);
-                                    $set('unit_price_local', $price * $rate);
-                                    $set('line_total', $qty * $price);
-                                    $set('line_total_local', $qty * $price * $rate);
+                                    $set('unit_price_local', $r2($price * $rate));
+                                    $set('line_total', $r2($qty * $price));
+                                    $set('line_total_local', $r2($qty * $price * $rate));
 
                                     $set('__currency_mirror', microtime(true));
 
@@ -461,7 +571,7 @@ class OrderResource extends \Filament\Resources\Resource
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
                                 })
-                                ->helperText(function (Forms\Get $get) use ($canSeeCost) {
+                                ->helperText(function (Forms\Get $get) use ($canSeeCost, $r2) {
                                     $get('__branch_mirror'); $get('__currency_mirror');
                                     $stock   = $get('stock_in_branch');
                                     $costUsd = (float) ($get('cost_price') ?? 0);
@@ -470,15 +580,10 @@ class OrderResource extends \Filament\Resources\Resource
                                     $cur  = $get('../../currency') ?: 'USD';
 
                                     $bits = [];
-                                    if (!is_null($stock)) {
-                                        $bits[] = $stock == 0
-                                            ? __('Available in branch: :count', ['count' => 0]) . ' — ' . __('out of stock')
-                                            : __('Available in branch: :count', ['count' => $stock]);
-                                    }
                                     if ($canSeeCost && $costUsd > 0) {
                                         $bits[] = __('Cost: :usd USD (:fx :cur)', [
-                                            'usd' => number_format($costUsd, 2),
-                                            'fx'  => number_format($costUsd * $rate, 2),
+                                            'usd' => number_format($r2($costUsd), 2),
+                                            'fx'  => number_format($r2($costUsd * $rate), 2),
                                             'cur' => $cur,
                                         ]);
                                     }
@@ -490,15 +595,15 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()->minValue(1)->default(1)
                                 ->inputMode('decimal')->step('1')
                                 ->live(onBlur: true)
-                                ->columnSpan(['default' => 6, 'lg' => 2])
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals) {
+                                ->columnSpan(['default' => 1, 'sm' => 1, 'md' => 2, 'lg' => 2])
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $r2) {
                                     $qty  = (float) $state;
                                     $usd  = (float) ($get('unit_price') ?? 0);
                                     $rate = (float) ($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
 
-                                    $set('line_total', $qty * $usd);
-                                    $set('line_total_local', $qty * $usd * $rate);
+                                    $set('line_total', $r2($qty * $usd));
+                                    $set('line_total_local', $r2($qty * $usd * $rate));
 
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
@@ -508,25 +613,26 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->label(fn (Forms\Get $get) => __('Unit price (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
                                 ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
                                 ->numeric()->step('0.01')->inputMode('decimal')
-                                ->reactive()
-                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                                ->rule('decimal:0,2')
+                                ->live(onBlur: true)
+                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                                     $rate = (float)($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
                                     $usd  = (float)($get('unit_price') ?? 0);
                                     $qty  = (float)($get('qty') ?? 1);
-                                    $set('unit_price_local', $usd * $rate);
-                                    $set('line_total_local', $qty * $usd * $rate);
+                                    $set('unit_price_local', $r2($usd * $rate));
+                                    $set('line_total_local', $r2($qty * $usd * $rate));
                                 })
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost) {
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $r2) {
                                     $rate = (float)($get('../../exchange_rate') ?? 1);
                                     if ($rate <= 0) $rate = 1;
 
-                                    $usd = (float)$state / $rate;
+                                    $usd = $r2(((float)$state) / $rate);
 
                                     $cost = (float) ($get('cost_price') ?? 0);
                                     if (!$canSellBelowCost && $cost > 0 && $usd < $cost) {
-                                        $usd = $cost;
-                                        $set('unit_price_local', $usd * $rate);
+                                        $usd = $r2($cost);
+                                        $set('unit_price_local', $r2($usd * $rate));
                                         $msg = $canSeeCost
                                             ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
                                             : __('Unit price raised to the minimum allowed.');
@@ -536,41 +642,80 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set('unit_price', $usd);
 
                                     $qty = (float) ($get('qty') ?? 1);
-                                    $set('line_total', $qty * $usd);
-                                    $set('line_total_local', $qty * (float)$state);
+                                    $set('line_total', $r2($qty * $usd));
+                                    $set('line_total_local', $r2($qty * $usd * $rate));
 
                                     $t = $compute((array) ($get('../../items') ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
                                     $setNestedTotals($set, $t);
                                 })
-                                ->helperText(function (Forms\Get $get) use ($canSeeCost) {
+                                ->helperText(function (Forms\Get $get) use ($canSeeCost, $r2) {
                                     if (!$canSeeCost) return null;
                                     $cost   = (float) ($get('cost_price') ?? 0);
                                     $margin = (float) ($get('../../margin_percent') ?? 0);
                                     $rate   = (float) ($get('../../exchange_rate') ?? 1);
                                     if ($cost <= 0 || $margin <= 0) return null;
-                                    $local = round($cost * (1 + $margin/100) * max(1,$rate), 2);
+                                    $local = $r2($cost * (1 + $margin/100) * max(1,$rate));
                                     return __('Cost + margin ≈ :calc', ['calc' => number_format($local, 2)]);
                                 })
-                                ->columnSpan(['default' => 6, 'lg' => 2]),
+                                ->columnSpan(['default' => 1, 'sm' => 1, 'md' => 2, 'lg' => 2]),
 
                             Forms\Components\TextInput::make('line_total_local')
                                 ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
                                 ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
                                 ->disabled()
                                 ->numeric()
-                                ->extraAttributes(['style' => 'font-weight:600;'])
-                                ->columnSpan(['default' => 6, 'lg' => 2]),
+                                ->extraAttributes(['class' => 'font-semibold'])
+                                ->columnSpan(['default' => 1, 'sm' => 1, 'md' => 2, 'lg' => 2]),
+
+                            Forms\Components\Placeholder::make('stock_indicator')
+                                ->label('')
+                                ->reactive()
+                                ->content(function (Forms\Get $get) {
+                                    $pid      = (int) ($get('product_id') ?? 0);
+                                    $branchId = (int) ($get('../../branch_id') ?: (auth()->user()?->branch_id ?? 0));
+
+                                    if (!$pid || !$branchId) {
+                                        return new \Illuminate\Support\HtmlString(
+                                            '<div style="color:#6b7280;margin-top:4px;">Stock: n/a</div>'
+                                        );
+                                    }
+
+                                    $prod  = \App\Models\Product::with(['stocks' => fn ($q) => $q->where('branch_id', $branchId)])->find($pid);
+                                    $stock = optional($prod?->stocks?->first())->stock;
+                                    $s     = (int) ($stock ?? 0);
+
+                                    // Detect language from app locale
+                                    $locale = app()->getLocale();
+                                    $label  = $locale === 'ar' ? 'المخزون' : 'Stock';
+                                    $notAvailable = $locale === 'ar' ? 'غير متوفر' : 'n/a';
+
+                                    // Pick color
+                                    $color = $s === 0
+                                        ? '#dc2626' // red
+                                        : ($s > 0 ? '#16a34a' : '#6b7280'); // green or gray
+
+                                    // Text
+                                    $text = $stock === null
+                                        ? "{$label}: {$notAvailable}"
+                                        : "{$label}: {$s}";
+
+                                    return new \Illuminate\Support\HtmlString(
+                                        '<div style="margin-top:4px;font-weight:600;color:' . $color . ';">' . e($text) . '</div>'
+                                    );
+                                })
+                                ->columnSpan(['default' => 1, 'sm' => 6, 'md' => 8, 'lg' => 12]),
+
 
                             Forms\Components\Placeholder::make('prev_sales')
                                 ->label(__('Previous sales to this customer'))
                                 ->reactive()
-                                ->content(function (Forms\Get $get) {
+                                ->content(function (Forms\Get $get) use ($r2) {
                                     $productId  = $get('product_id');
                                     $customerId = (int) ($get('../../customer_id') ?? 0);
                                     $get('__customer_mirror');
 
                                     if (!$productId || !$customerId) {
-                                        return new HtmlString('<div style="color:#6b7280;">' . e(__('No previous sales')) . '</div>');
+                                        return new HtmlString('<div class="text-gray-500">' . e(__('No previous sales')) . '</div>');
                                     }
 
                                     $user = auth()->user();
@@ -590,7 +735,7 @@ class OrderResource extends \Filament\Resources\Resource
 
                                     $rows = $q->limit(10)->get();
                                     if ($rows->isEmpty()) {
-                                        return new HtmlString('<div style="color:#6b7280;">' . e(__('No previous sales')) . '</div>');
+                                        return new HtmlString('<div class="text-gray-500">' . e(__('No previous sales')) . '</div>');
                                     }
 
                                     $itemsHtml = [];
@@ -600,29 +745,24 @@ class OrderResource extends \Filament\Resources\Resource
 
                                         $unitUsd   = (float) ($row->unit_price ?? 0);
                                         $rate      = (float) ($order->exchange_rate ?? 1);
-                                        $converted = number_format($unitUsd * $rate, 2);
+                                        $converted = number_format($r2($unitUsd * $rate), 2);
                                         $cur       = $order->currency ?: 'USD';
                                         $date      = optional($order->created_at)->format('Y-m-d');
 
-                                        $itemsHtml[] = "<li style='color:#dc2626;'>{$converted} {$cur} <span style=\"opacity:.7\">({$date})</span></li>";
+                                        $itemsHtml[] = "<li class='text-red-600'>{$converted} {$cur} <span class='opacity-70'>($date)</span></li>";
                                     }
 
                                     return new HtmlString(
-                                        '<details style="margin:.25rem 0 0;" open>
-                                           <summary style="cursor:pointer;user-select:none;">' . e(__('Previous sales')) . ' (' . count($itemsHtml) . ')</summary>
-                                           <div style="max-height:200px;overflow:auto;margin-top:.35rem;">
-                                             <ul style="margin:0;padding-left:1rem;list-style:disc;">' . implode('', $itemsHtml) . '</ul>
+                                        '<details class="mt-1" open>
+                                           <summary class="cursor-pointer select-none">' . e(__('Previous sales')) . ' (' . count($itemsHtml) . ')</summary>
+                                           <div class="max-h-48 overflow-auto mt-1.5">
+                                             <ul class="m-0 pl-4 list-disc">' . implode('', $itemsHtml) . '</ul>
                                            </div>
                                          </details>'
                                     );
                                 })
                                 ->columnSpanFull(),
-                        ])
-                        ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals) {
-                            $rate = (float) ($get('../../exchange_rate') ?? 1);
-                            $t = $compute((array) ($get('../../items') ?? $state ?? []), (float) ($get('../../discount') ?? 0), (float) ($get('../../shipping') ?? 0), $rate);
-                            $setNestedTotals($set, $t);
-                        }),
+                        ]),
                 ]),
 
             Forms\Components\Section::make(__('Totals & Currency'))
@@ -635,45 +775,63 @@ class OrderResource extends \Filament\Resources\Resource
                     Forms\Components\TextInput::make('discount_local')
                         ->label(fn (Forms\Get $get) => __('Discount'))
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
-                        ->numeric()->default(0)->reactive()
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->numeric()->default(0)
+                        ->step('0.01')
+                        ->rule('decimal:0,2')
+                        ->live(onBlur: true)
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                             $rate = (float)($get('exchange_rate') ?? 1);
                             if ($rate <= 0) $rate = 1;
-                            $set('discount_local', ((float)($get('discount') ?? 0)) * $rate);
+                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                             $rate = (float)($get('exchange_rate') ?? 1);
                             if ($rate <= 0) $rate = 1;
-                            $set('discount', ((float)$state) / $rate);
+                            $set('discount', $r2(((float)$state) / $rate));
+
+                            $items = (array) ($get('items') ?? []);
+                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $totalUsd    = $r2(max(0, $subtotalUsd - (float)$get('discount') + (float)$get('shipping')));
+                            $set('subtotal', $subtotalUsd);
+                            $set('total', $totalUsd);
                         })
-                        ->columnSpan(5),
+                        ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 5]),
 
                     Forms\Components\TextInput::make('shipping_local')
                         ->label(fn (Forms\Get $get) => __('Shipping'))
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
-                        ->numeric()->default(0)->reactive()
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->numeric()->default(0)
+                        ->step('0.01')
+                        ->rule('decimal:0,2')
+                        ->live(onBlur: true)
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                             $rate = (float)($get('exchange_rate') ?? 1);
                             if ($rate <= 0) $rate = 1;
-                            $set('shipping_local', ((float)($get('shipping') ?? 0)) * $rate);
+                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
                             $rate = (float)($get('exchange_rate') ?? 1);
                             if ($rate <= 0) $rate = 1;
-                            $set('shipping', ((float)$state) / $rate);
+                            $set('shipping', $r2(((float)$state) / $rate));
+
+                            $items = (array) ($get('items') ?? []);
+                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $totalUsd    = $r2(max(0, $subtotalUsd - (float)$get('discount') + (float)$get('shipping')));
+                            $set('subtotal', $subtotalUsd);
+                            $set('total', $totalUsd);
                         })
-                        ->columnSpan(5),
+                        ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 5]),
 
                     Forms\Components\Placeholder::make('exchange_rate_info')
                         ->label(__('Exchange rate'))
                         ->content(fn (Forms\Get $get) =>
-                            '1 USD = ' . number_format((float)($get('exchange_rate') ?? 1), 6) . ' ' . ($get('currency') ?: 'USD')
+                            '1 ' . __('USD') . ' = ' . number_format((float)($get('exchange_rate') ?? 1), 6) . ' ' . ($get('currency') ?: 'USD')
                         )
                         ->columnSpanFull(),
 
                     Forms\Components\Placeholder::make('subtotal_display')
                         ->label(fn (Forms\Get $get) => __('Subtotal (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) {
+                        ->content(function (Forms\Get $get) use ($r2) {
                             $rate  = (float)($get('exchange_rate') ?? 1);
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
@@ -682,16 +840,16 @@ class OrderResource extends \Filament\Resources\Resource
                                     ? $order->items->map(fn($i) => ['qty' => (float)$i->qty, 'unit_price' => (float)$i->unit_price])->toArray()
                                     : [];
                             }
-                            $subtotalUsd = collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0));
-                            $fx = $subtotalUsd * $rate;
-                            return new HtmlString('<span style="color:#dc2626;font-weight:600;">' . number_format($fx, 2) . '</span>');
+                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $fx = $r2($subtotalUsd * $rate);
+                            return new HtmlString('<span class="text-red-600 font-semibold">' . number_format($fx, 2) . '</span>');
                         })
-                        ->columnSpan(6),
+                        ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
 
                     Forms\Components\Placeholder::make('total_display')
                         ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) {
-                            $rate = (float)($get('exchange_rate') ?? 1);
+                        ->content(function (Forms\Get $get) use ($r2) {
+                            $rate = (float) ($get('exchange_rate') ?? 1);
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::with('items')->find($id);
@@ -699,17 +857,22 @@ class OrderResource extends \Filament\Resources\Resource
                                     ? $order->items->map(fn($i) => ['qty' => (float)$i->qty, 'unit_price' => (float)$i->unit_price])->toArray()
                                     : [];
                             }
-                            $subtotalUsd = collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0));
-                            $discountUsd = (float) ($get('discount') ?? 0);
-                            $shippingUsd = (float) ($get('shipping') ?? 0);
-                            $totalUsd    = max(0, $subtotalUsd - $discountUsd + $shippingUsd);
-                            $fx          = $totalUsd * $rate;
+                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $discountUsd = $r2((float) ($get('discount') ?? 0));
+                            $shippingUsd = $r2((float) ($get('shipping') ?? 0));
+                            $totalUsd    = $r2(max(0, $subtotalUsd - $discountUsd + $shippingUsd));
+                            $fx          = $r2($totalUsd * $rate);
 
-                            return new HtmlString('<span style="color:#dc2626;font-weight:600;">' . number_format($fx, 2) . '</span>');
+                            return new HtmlString('<span class="text-red-600 font-semibold">' . number_format($fx, 2) . '</span>');
                         })
-                        ->columnSpan(6),
+                        ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
                 ])
-                ->columns(12),
+                ->columns([
+                    'default' => 1,
+                    'sm' => 2,
+                    'md' => 6,
+                    'lg' => 12,
+                ]),
         ]);
     }
 
@@ -723,7 +886,7 @@ class OrderResource extends \Filament\Resources\Resource
                 Tables\Columns\TextColumn::make('customer.name')->label(__('Customer'))->wrap()->searchable(),
                 Tables\Columns\TextColumn::make('seller.name')
                     ->label(__('Seller'))
-                    ->state(fn (Order $r) => $r->seller?->name ?? 'Admin')
+                    ->state(fn (Order $r) => $r->seller?->name ?? __('Admin'))
                     ->searchable()
                     ->wrap(),
                 Tables\Columns\TextColumn::make('type')
@@ -745,7 +908,7 @@ class OrderResource extends \Filament\Resources\Resource
 
                 Tables\Columns\TextColumn::make('shipping_fx')
                     ->label(__('Shipping'))
-                    ->state(fn (Order $r) => number_format((float)$r->shipping * (float)$r->exchange_rate, 2))
+                    ->state(fn (Order $r) => number_format(((float)$r->shipping * (float)$r->exchange_rate), 2))
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap()
                     ->sortable(false),
@@ -779,9 +942,10 @@ class OrderResource extends \Filament\Resources\Resource
                     ->options(fn () => ['USD'=>'USD'] + CurrencyRate::query()->orderBy('code')->pluck('code','code')->toArray()),
             ])
             ->actions([
-                Tables\Actions\Action::make('pdf')->label(__('PDF'))
+                Tables\Actions\Action::make('pdf')
+                    ->label(__('PDF'))
                     ->icon('heroicon-o-arrow-down-tray')
-                    ->url(fn (Order $record) => route('admin.orders.pdf', $record))
+                    ->url(fn (Order $record) => route('admin.orders.pdf', $record) . '?lang=' . app()->getLocale())
                     ->openUrlInNewTab(),
                 Tables\Actions\EditAction::make()->label(__('Edit')),
             ])
@@ -794,6 +958,7 @@ class OrderResource extends \Filament\Resources\Resource
             PaymentsRelationManager::class,
         ];
     }
+
     public static function getPages(): array
     {
         return [
@@ -810,7 +975,6 @@ class OrderResource extends \Filament\Resources\Resource
 
         if ($user?->hasRole('seller')) {
             $query->where('seller_id', $user->id);
-            // if ($user->branch_id) $query->where('branch_id', $user->branch_id);
         }
 
         return $query->with(['customer','seller','branch','items']);

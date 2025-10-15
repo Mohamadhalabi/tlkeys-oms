@@ -22,6 +22,7 @@ class Order extends Model
         'total'         => 'decimal:2',
         'exchange_rate' => 'decimal:6',
         'paid_amount'   => 'decimal:2',
+        'stock_state' => 'array',
     ];
 
     protected static function booted(): void
@@ -43,7 +44,12 @@ class Order extends Model
         return $code;
     }
 
-    public function items()    { return $this->hasMany(OrderItem::class); }
+    public function items()
+    {
+        return $this->hasMany(\App\Models\OrderItem::class)
+            ->orderBy('sort')
+            ->orderBy('id'); // secondary tie-breaker
+    }
     public function branch()   { return $this->belongsTo(Branch::class); }
     public function customer() { return $this->belongsTo(Customer::class); }
     public function seller()   { return $this->belongsTo(User::class,'seller_id'); }

@@ -1,10 +1,8 @@
 <?php
-// app/Filament/Resources/OrderResource/Pages/CreateOrder.php
 
 namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
-use App\Models\CurrencyRate;
 use Filament\Resources\Pages\CreateRecord;
 use Illuminate\Support\Facades\DB;
 
@@ -34,15 +32,13 @@ class CreateOrder extends CreateRecord
         $data['shipping'] = round($shippingUsd, 2);
         $data['total']    = round(max(0, $subtotalUsd - $discountUsd + $shippingUsd), 2);
 
-        // 🔐 Important: don’t persist payment fields on proforma
         if (($data['type'] ?? 'proforma') === 'proforma') {
-            $data['customer_id'] = $data['customer_id'] ?? null; // proforma can be without customer
+            $data['customer_id'] = $data['customer_id'] ?? null;
             unset($data['payment_status'], $data['paid_amount']);
         } else {
-            // Normalize paid_amount based on payment_status
-            $total = (float)($data['total'] ?? 0);
+            $total  = (float)($data['total'] ?? 0);
             $status = $data['payment_status'] ?? 'unpaid';
-            $paid = (float)($data['paid_amount'] ?? 0);
+            $paid   = (float)($data['paid_amount'] ?? 0);
 
             $data['paid_amount'] = match ($status) {
                 'paid'            => $total,
@@ -55,29 +51,56 @@ class CreateOrder extends CreateRecord
         return $data;
     }
 
-
     protected function afterCreate(): void
     {
-        $order = $this->record->loadMissing('items');
-        $branchId = (int) $order->branch_id;
+        \Illuminate\Support\Facades\DB::transaction(function () {
+            $order    = $this->record->loadMissing('items');
+            $branchId = (int) $order->branch_id;
 
-        foreach ($order->items as $item) {
-            self::adjustBranchStock((int)$item->product_id, $branchId, -1 * (int)$item->qty);
-        }
+            // Only deduct stock for 'order' type
+            if ($order->type === 'order') {
+                logger()->info('Starting stock deduction for new order', [
+                    'order_id' => $order->id,
+                    'branchId' => $branchId,
+                    'items' => $order->items->map(fn($item) => ['product_id' => $item->product_id, 'qty' => $item->qty])->toArray(),
+                ]);
 
-        // NEW: write / update wallet rows (debit + initial credit)
-        $order->syncWallet();
+                foreach ($order->items as $item) {
+                    $pid = (int) $item->product_id;
+                    $qty = (int) $item->qty;
+                    if ($pid > 0 && $qty > 0) {
+                        self::adjustBranchStock($pid, $branchId, -$qty); // deduct
+                    }
+                }
+            }
+
+            $order->syncWallet();
+        });
     }
 
-
+    /** same robust helper as in EditOrder */
     public static function adjustBranchStock(int $productId, int $branchId, int $delta): void
     {
-        if ($branchId <= 0) return;
+        if ($branchId <= 0 || $productId <= 0 || $delta === 0) return;
 
-        DB::table('product_branch')
+        $affected = DB::table('product_branch')
             ->where('product_id', $productId)
             ->where('branch_id', $branchId)
             ->lockForUpdate()
-            ->update(['stock' => DB::raw('GREATEST(0, stock + (' . $delta . '))')]);
+            ->update([
+                'stock' => DB::raw('GREATEST(0, COALESCE(stock,0) + (' . (int)$delta . '))'),
+            ]);
+
+        logger()->info('Stock adjust in create', compact('productId', 'branchId', 'delta', 'affected'));
+
+        if ($affected === 0) {
+            $initial = max(0, (int)$delta);
+            DB::table('product_branch')->insert([
+                'product_id' => $productId,
+                'branch_id'  => $branchId,
+                'stock'      => $initial,
+            ]);
+            logger()->info('Inserted new product_branch', compact('productId', 'branchId', 'initial'));
+        }
     }
 }

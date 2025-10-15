@@ -6,29 +6,37 @@ use App\Models\Order;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use niklasravnsborg\LaravelPdf\Facades\Pdf;
+use Filament\Facades\Filament;
 
 class OrderPdfController extends Controller
 {
+
     public function show(Order $order)
     {
         @set_time_limit(120);
 
+        // ✅ Decide language for the PDF
+        $locale = request('lang')
+            ?? session('locale')
+            ?? app()->getLocale()
+            ?? config('app.locale');
+
+        app()->setLocale($locale);
+
         $order->load([
-            'customer:id,name,email,phone,address', // removed ,uuid
+            'customer:id,name,email,phone,address',
             'seller:id,name',
             'branch:id,name,code',
             'items.product:id,sku,title,image',
         ]);
 
-
-        // Company logo (local only)
+        // build $logoPath, $imgMap, $data exactly like before…
         $logoPath = null;
         try {
-            $candidate = Storage::disk('public')->path('logo.png'); // storage/app/public/logo.png
+            $candidate = \Storage::disk('public')->path('logo.png');
             if (is_file($candidate)) $logoPath = $candidate;
         } catch (\Throwable $e) {}
 
-        // Build a map of product_id => src (either file://path or data:image/..;base64,..)
         $imgMap = [];
         foreach ($order->items as $row) {
             $imgMap[$row->product_id] = $this->resolveImageSrc($row->product?->image);
@@ -41,27 +49,30 @@ class OrderPdfController extends Controller
             'imgMap'   => $imgMap,
         ];
 
-        // mPDF config (keep remote off; we embed base64 for remote)
-        $pdf = Pdf::loadView(
+        $pdf = \niklasravnsborg\LaravelPdf\Facades\Pdf::loadView(
             'pdf.order',
             $data,
             [],
             [
-                'format'         => 'A4',
-                'orientation'    => 'P',
-                'default_font'   => 'amiri',
-                'margin_left'    => 14,
-                'margin_right'   => 14,
-                'margin_top'     => 16,
-                'margin_bottom'  => 20,
-                'enable_remote'  => false,
+                'mode'             => 'utf-8',
+                'format'           => 'A4',
+                'orientation'      => 'P',
+                'default_font'     => 'amiri',
+                'autoScriptToLang' => true,
+                'autoLangToFont'   => true,
+                'margin_left'      => 14,
+                'margin_right'     => 14,
+                'margin_top'       => 16,
+                'margin_bottom'    => 20,
+                'enable_remote'    => false,
             ]
         );
 
         $downloadName = ($order->uuid ?? ('TLO' . str_pad($order->id, 6, '0', STR_PAD_LEFT))) . '.pdf';
-
         return $pdf->stream($downloadName);
     }
+
+
 
     /**
      * Return a PDF-safe <img src>:
