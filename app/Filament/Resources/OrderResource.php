@@ -537,35 +537,44 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->label(__('Product'))
                                 ->searchable()
                                 ->preload(false)
-                                ->getSearchResultsUsing(function (string $search, Forms\Get $get) use ($titleFor, $locale) {
-                                    $chosenBranch = $get('../../branch_id');
-                                    $userBranch   = auth()->user()?->branch_id;
-                                    $branchId     = $chosenBranch ?: $userBranch;
+                            ->getSearchResultsUsing(function (string $search, Forms\Get $get) use ($titleFor, $locale) {
+                                $chosenBranch = $get('../../branch_id');
+                                $userBranch   = auth()->user()?->branch_id;
+                                $branchId     = $chosenBranch ?: $userBranch;
 
-                                    $q = Product::query()
-                                        ->select('id','sku','title');
+                                $s = mb_strtolower(trim($search));
 
-                                    if ($branchId && method_exists($q->getModel(), 'scopeForBranch')) {
-                                        $q->forBranch($branchId);
-                                    }
+                                $q = Product::query()->select('id','sku','title');
 
-                                    if ($search !== '') {
-                                        $q->where(function ($qq) use ($search) {
-                                            $qq->where('sku', 'like', "%{$search}%")
-                                               ->orWhere('title', 'like', "%{$search}%");
-                                        });
-                                    }
+                                if ($branchId && method_exists($q->getModel(), 'scopeForBranch')) {
+                                    $q->forBranch($branchId);
+                                }
 
-                                    return $q->orderBy('sku')
-                                        ->limit(50)
-                                        ->get()
-                                        ->mapWithKeys(function (Product $p) use ($titleFor, $locale) {
-                                            $title = trim($titleFor($p, $locale));
-                                            $label = trim($p->sku . ($title !== '' ? ' — ' . $title : ''));
-                                            return [$p->id => $label];
-                                        })
-                                        ->toArray();
-                                })
+                                if ($s !== '') {
+                                    $q->where(function ($qq) use ($s, $locale) {
+                                        // Always case-insensitive for SKU
+                                        $qq->whereRaw('LOWER(sku) LIKE ?', ["%{$s}%"]);
+
+                                        // Title (plain text column)
+                                        $qq->orWhereRaw('LOWER(title) LIKE ?', ["%{$s}%"]);
+
+                                        // OPTIONAL: if `title` is JSON (translatable), also search the current locale + English
+                                        $qq->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(title, '$.\"$locale\"'))) LIKE ?", ["%{$s}%"])
+                                        ->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(title, '$.\"en\"'))) LIKE ?", ["%{$s}%"]);
+                                    });
+                                }
+
+                                return $q->orderBy('sku')
+                                    ->limit(50)
+                                    ->get()
+                                    ->mapWithKeys(function (\App\Models\Product $p) use ($titleFor, $locale) {
+                                        $title = trim($titleFor($p, $locale));
+                                        $label = trim($p->sku . ($title !== '' ? ' — ' . $title : ''));
+                                        return [$p->id => $label];
+                                    })
+                                    ->toArray();
+                            })
+
                                 ->getOptionLabelUsing(function ($value) use ($titleFor, $locale) {
                                     if (!$value) return null;
                                     $p = Product::query()->select('id','sku','title')->find((int)$value);
