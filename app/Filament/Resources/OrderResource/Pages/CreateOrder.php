@@ -18,10 +18,13 @@ class CreateOrder extends CreateRecord
             $data['branch_id'] = $data['branch_id'] ?? $user->branch_id;
         }
 
+        // Snapshot exchange rate ONCE at creation (based on chosen currency)
         $code = $data['currency'] ?? 'USD';
         $rate = \App\Models\CurrencyRate::getRate($code);
+        if ($rate <= 0) $rate = 1;
         $data['exchange_rate'] = $rate;
 
+        // Totals in USD are canonical (derived once from local via live handlers)
         $subtotalUsd = collect($data['items'] ?? [])
             ->sum(fn ($i) => (float)($i['qty'] ?? 0) * (float)($i['unit_price'] ?? 0));
         $discountUsd = (float)($data['discount'] ?? 0);
@@ -59,12 +62,6 @@ class CreateOrder extends CreateRecord
 
             // Only deduct stock for 'order' type
             if ($order->type === 'order') {
-                logger()->info('Starting stock deduction for new order', [
-                    'order_id' => $order->id,
-                    'branchId' => $branchId,
-                    'items' => $order->items->map(fn($item) => ['product_id' => $item->product_id, 'qty' => $item->qty])->toArray(),
-                ]);
-
                 foreach ($order->items as $item) {
                     $pid = (int) $item->product_id;
                     $qty = (int) $item->qty;
@@ -83,11 +80,8 @@ class CreateOrder extends CreateRecord
     {
         if ($branchId <= 0 || $productId <= 0 || $delta === 0) return;
 
-        // initial insert value: don't allow negative on first creation
         $initial = $delta;
 
-        // SQL: if row doesn't exist -> insert stock = GREATEST(0, :initial)
-        //      if row exists        -> update stock = GREATEST(0, COALESCE(stock,0) + :delta)
         DB::statement(
             'INSERT INTO product_branch (product_id, branch_id, stock)
             VALUES (?, ?, GREATEST(0, ?))

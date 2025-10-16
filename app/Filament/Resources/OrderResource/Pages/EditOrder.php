@@ -7,7 +7,6 @@ use App\Models\ProductBranch;
 use Filament\Resources\Pages\EditRecord;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Arr;
 
 class EditOrder extends EditRecord
 {
@@ -28,13 +27,12 @@ class EditOrder extends EditRecord
             ->all();
         ksort($items);
 
-        // IMPORTANT: normalize type to lowercase so "Order"/"order" works
         $type = strtolower((string) ($this->record->type ?? 'order'));
 
         return [
             'branch_id' => (int) $this->record->branch_id,
-            'type'      => $type,           // 'order' | 'proforma'
-            'items'     => $items,          // [product_id => qty]
+            'type'      => $type,
+            'items'     => $items,
         ];
     }
 
@@ -55,6 +53,10 @@ class EditOrder extends EditRecord
                 'items'     => $preItems,
             ];
         }
+
+        // VERY IMPORTANT: Do NOT touch currency or exchange_rate here.
+        // User input in local currency has already been converted once to USD
+        // by the form handlers. No re-conversion on save.
 
         return $data;
     }
@@ -88,7 +90,6 @@ class EditOrder extends EditRecord
 
         if ($oldType === 'order' && $newType === 'order') {
             if ($oldBranch === $newBranch) {
-                // Same branch: delta = old - new (increase qty ⇒ negative ⇒ deduct)
                 $pids = array_unique(array_merge(array_keys($oldItems), array_keys($newItems)));
                 foreach ($pids as $pid) {
                     $delta = (int)($oldItems[$pid] ?? 0) - (int)($newItems[$pid] ?? 0);
@@ -97,7 +98,6 @@ class EditOrder extends EditRecord
                     }
                 }
             } else {
-                // Branch changed: restock OLD to old branch, deduct NEW from new branch
                 foreach ($oldItems as $pid => $q) if ($q > 0) $moves[] = [$oldBranch, (int)$pid, +$q];
                 foreach ($newItems as $pid => $q) if ($q > 0) $moves[] = [$newBranch, (int)$pid, -$q];
             }
@@ -108,18 +108,12 @@ class EditOrder extends EditRecord
         }
 
         if ($this->debug) {
-            // Human-readable debug
             $lines = [];
             foreach ($moves as [$b, $p, $d]) {
                 $lines[] = "branch:$b product:$p delta:$d";
             }
-            $msg = "OLD: ".json_encode($old)." \nNEW: ".json_encode($new)." \nMOVES:\n".($lines ? implode("\n", $lines) : '[none]');
+            // You can enable logging here if needed
             // logger()->debug('[EditOrder] Stock reconcile', ['old' => $old, 'new' => $new, 'moves' => $moves]);
-            // Notification::make()
-            //     ->title('Stock reconcile (debug)')
-            //     ->body(strlen($msg) > 450 ? substr($msg, 0, 450).'…' : $msg)
-            //     ->success()
-            //     ->send();
         }
 
         if ($moves) {
@@ -140,12 +134,11 @@ class EditOrder extends EditRecord
 
                     $current = (int) $row->stock;
 
-                    // if stock is 0, ignore both increase/decrease moves
+                    // If stock is 0, ignore both increase/decrease moves
                     if ($current === 0) {
                         continue;
                     }
 
-                    // apply delta only if there’s stock
                     $row->stock = max(0, $current + (int) $delta);
                     $row->save();
                 }
