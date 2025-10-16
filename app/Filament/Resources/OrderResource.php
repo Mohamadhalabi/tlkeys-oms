@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\HtmlString;
 use Filament\Notifications\Notification;
+use Illuminate\Validation\Rule;
 
 class OrderResource extends \Filament\Resources\Resource
 {
@@ -255,28 +256,51 @@ class OrderResource extends \Filament\Resources\Resource
                         ->disabled(fn (Forms\Get $get, $record) => $record && $record->type === 'order')
                         ->columnSpan(['sm' => 2, 'md' => 1, 'lg' => 1]),
 
+
+
                     Forms\Components\Select::make('customer_id')
                         ->label(__('Customer'))
-                        ->options(function () use ($user) {
-                            return Cache::remember('order_form_customer_opts_' . ($user?->hasRole('seller') ? ('seller_'.$user->id) : 'all'), 300, function () use ($user) {
-                                $q = Customer::query()->select('id','name')->orderBy('name');
-                                if ($user?->hasRole('seller')) $q->where('seller_id', $user->id);
-                                return $q->pluck('name','id');
-                            });
-                        })
                         ->searchable()
-                        ->preload()
-                        ->reactive()
-                        ->required(fn (Forms\Get $get) => $get('type') === 'order')
-                        ->rule(function (Forms\Get $get) {
-                            return $get('type') === 'order'
-                                ? ['required', 'exists:customers,id']
-                                : ['nullable'];
+                        ->preload(false) // don't preload everything; we fetch only this seller's rows
+                        ->getSearchResultsUsing(function (string $search) {
+                            $sellerId = auth()->id();
+
+                            return Customer::query()
+                                ->where('seller_id', $sellerId)
+                                ->when($search !== '', function ($q) use ($search) {
+                                    $q->where(function ($qq) use ($search) {
+                                        $qq->where('name', 'like', "%{$search}%")
+                                        ->orWhere('code', 'like', "%{$search}%")
+                                        ->orWhere('email', 'like', "%{$search}%")
+                                        ->orWhere('phone', 'like', "%{$search}%");
+                                    });
+                                })
+                                ->orderBy('name')
+                                ->limit(50)
+                                ->pluck('name', 'id')
+                                ->toArray();
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) {
-                            foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                                $set("items.$i.__customer_mirror", (int) $state);
+                        ->getOptionLabelUsing(function ($value) {
+                            if (!$value) return null;
+
+                            return Customer::query()
+                                ->where('seller_id', auth()->id())
+                                ->whereKey($value)
+                                ->value('name');
+                        })
+                        ->required(fn (Forms\Get $get) => $get('type') === 'order')
+                        // hard validation (can’t be bypassed)
+                        ->rule(function (Forms\Get $get) {
+                            if ($get('type') !== 'order') {
+                                return ['nullable'];
                             }
+
+                            return [
+                                'required',
+                                Rule::exists('customers', 'id')->where(fn ($q) =>
+                                    $q->where('seller_id', auth()->id())
+                                ),
+                            ];
                         })
                         ->createOptionForm([
                             Forms\Components\TextInput::make('name')->label(__('Name'))->required(),
@@ -284,11 +308,14 @@ class OrderResource extends \Filament\Resources\Resource
                             Forms\Components\TextInput::make('phone')->label(__('Phone'))->nullable(),
                             Forms\Components\Textarea::make('address')->label(__('Address'))->rows(3)->nullable(),
                         ])
-                        ->createOptionUsing(function (array $data) use ($user) {
-                            if ($user?->hasRole('seller')) $data['seller_id'] = $user->id;
-                            return Customer::create($data)->id;
+                        ->createOptionUsing(function (array $data) {
+                            // make the new customer belong to this seller
+                            $data['seller_id'] = auth()->id();
+                            return \App\Models\Customer::create($data)->id;
                         })
                         ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
+
+
 
                     Forms\Components\Select::make('payment_status')
                         ->label(__('Payment status'))

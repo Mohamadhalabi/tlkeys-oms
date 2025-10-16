@@ -37,4 +37,15 @@ Route::middleware(['web','auth'])->group(function () {
     Route::get('/admin/orders/{order}/pdf', [OrderPdfController::class, 'show'])
         ->name('admin.orders.pdf');
 });
+
+Route::get('/seller/set-locale/{locale}', function (string $locale) {
+    // allow only your supported locales
+    if (! in_array($locale, ['en','ar'])) {
+        $locale = 'en';
+    }
+    session(['locale' => $locale]);
+    app()->setLocale($locale);
+    return back();
+})->name('seller.set-locale');
+
 require __DIR__.'/auth.php';

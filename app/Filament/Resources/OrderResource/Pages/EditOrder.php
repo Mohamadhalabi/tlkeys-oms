@@ -114,12 +114,12 @@ class EditOrder extends EditRecord
                 $lines[] = "branch:$b product:$p delta:$d";
             }
             $msg = "OLD: ".json_encode($old)." \nNEW: ".json_encode($new)." \nMOVES:\n".($lines ? implode("\n", $lines) : '[none]');
-            logger()->debug('[EditOrder] Stock reconcile', ['old' => $old, 'new' => $new, 'moves' => $moves]);
-            Notification::make()
-                ->title('Stock reconcile (debug)')
-                ->body(strlen($msg) > 450 ? substr($msg, 0, 450).'…' : $msg)
-                ->success()
-                ->send();
+            // logger()->debug('[EditOrder] Stock reconcile', ['old' => $old, 'new' => $new, 'moves' => $moves]);
+            // Notification::make()
+            //     ->title('Stock reconcile (debug)')
+            //     ->body(strlen($msg) > 450 ? substr($msg, 0, 450).'…' : $msg)
+            //     ->success()
+            //     ->send();
         }
 
         if ($moves) {

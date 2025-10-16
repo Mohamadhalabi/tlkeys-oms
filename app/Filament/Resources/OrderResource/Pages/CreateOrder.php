@@ -83,24 +83,17 @@ class CreateOrder extends CreateRecord
     {
         if ($branchId <= 0 || $productId <= 0 || $delta === 0) return;
 
-        $affected = DB::table('product_branch')
-            ->where('product_id', $productId)
-            ->where('branch_id', $branchId)
-            ->lockForUpdate()
-            ->update([
-                'stock' => DB::raw('GREATEST(0, COALESCE(stock,0) + (' . (int)$delta . '))'),
-            ]);
+        // initial insert value: don't allow negative on first creation
+        $initial = $delta;
 
-        logger()->info('Stock adjust in create', compact('productId', 'branchId', 'delta', 'affected'));
-
-        if ($affected === 0) {
-            $initial = max(0, (int)$delta);
-            DB::table('product_branch')->insert([
-                'product_id' => $productId,
-                'branch_id'  => $branchId,
-                'stock'      => $initial,
-            ]);
-            logger()->info('Inserted new product_branch', compact('productId', 'branchId', 'initial'));
-        }
+        // SQL: if row doesn't exist -> insert stock = GREATEST(0, :initial)
+        //      if row exists        -> update stock = GREATEST(0, COALESCE(stock,0) + :delta)
+        DB::statement(
+            'INSERT INTO product_branch (product_id, branch_id, stock)
+            VALUES (?, ?, GREATEST(0, ?))
+            ON DUPLICATE KEY UPDATE
+                stock = GREATEST(0, COALESCE(stock,0) + ?)',
+            [$productId, $branchId, $initial, $delta]
+        );
     }
 }
