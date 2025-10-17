@@ -22,7 +22,7 @@ class OrderPdfController extends Controller
         app()->setLocale($locale);
 
         $order->load([
-            'customer:id,name,email,phone,address,city,country,postal_code',
+            'customer:id,name,email,phone,address',
             'seller:id,name',
             'branch:id,name,code',
             'items.product:id,sku,title,image',
