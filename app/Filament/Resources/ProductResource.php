@@ -4,6 +4,7 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\ProductResource\Pages;
 use App\Models\Product;
+use App\Models\Branch;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Forms\Components\FileUpload;
@@ -79,7 +80,6 @@ class ProductResource extends Resource
                     ->numeric()
                     ->prefix('$'),
 
-                // Cost price (admins always see; sellers only if allowed)
                 TextInput::make('cost_price')
                     ->label(__('Cost price'))
                     ->numeric()
@@ -128,41 +128,62 @@ class ProductResource extends Resource
     {
         $user = auth()->user();
 
-        return $table
-            ->columns([
-                Tables\Columns\ImageColumn::make('image')->label(__('Image'))->square(),
-                Tables\Columns\TextColumn::make('sku')->label(__('SKU'))->searchable()->sortable(),
+        // Base columns
+        $columns = [
+            Tables\Columns\ImageColumn::make('image')->label(__('Image'))->square(),
+            Tables\Columns\TextColumn::make('sku')->label(__('SKU'))->searchable()->sortable(),
+            Tables\Columns\TextColumn::make('title')
+                ->label(__('Title'))
+                ->state(fn (Product $r) => $r->getTranslation('title', app()->getLocale() ?: 'en'))
+                ->searchable(query: function (Builder $q, string $search): Builder {
+                    return $q->whereRaw("JSON_SEARCH(JSON_EXTRACT(title, '$'), 'one', ?) IS NOT NULL", [$search]);
+                })
+                ->sortable(),
+            Tables\Columns\TextColumn::make('price')->label(__('Price'))->money('usd')->sortable(),
+            Tables\Columns\TextColumn::make('sale_price')->label(__('Sale price'))->money('usd')->sortable(),
+            Tables\Columns\TextColumn::make('cost_price')
+                ->label(__('Cost price'))
+                ->money('usd')
+                ->sortable()
+                ->visible(fn () => $user?->hasRole('admin') || ($user?->can_see_cost ?? false)),
+            Tables\Columns\TextColumn::make('weight')->label(__('Weight'))->numeric()->sortable(),
+            Tables\Columns\TextColumn::make('created_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
+            Tables\Columns\TextColumn::make('updated_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
+        ];
 
-                // current locale title from JSON
-                Tables\Columns\TextColumn::make('title')
-                    ->label(__('Title'))
-                    ->state(fn (Product $r) => $r->getTranslation('title', app()->getLocale() ?: 'en'))
-                    ->searchable(query: function (Builder $q, string $search): Builder {
-                        return $q->whereRaw("JSON_SEARCH(JSON_EXTRACT(`title`, '$'), 'one', ?) IS NOT NULL", [$search]);
-                    })
-                    ->sortable(),
-
-                Tables\Columns\TextColumn::make('price')->label(__('Price'))->money('usd')->sortable(),
-                Tables\Columns\TextColumn::make('sale_price')->label(__('Sale price'))->money('usd')->sortable(),
-
-                // Cost visible only to admins or sellers who may see cost
-                Tables\Columns\TextColumn::make('cost_price')
-                    ->label(__('Cost price'))
-                    ->money('usd')
+        // Stock columns
+        if ($user?->hasRole('admin')) {
+            $branches = Branch::query()->orderBy('id')->get();
+            foreach ($branches as $b) {
+                $columns[] = Tables\Columns\TextColumn::make("stock_branch_{$b->id}")
+                    ->label($b->name)
+                    ->tooltip(fn (Product $r) => __('Alert at') . ': ' . ((int) optional(
+                        $r->inventories->firstWhere('branch_id', $b->id)
+                    )->stock_alert ?? 0))
+                    ->state(fn (Product $r) => $r->stockForBranch($b->id))
                     ->sortable()
-                    ->visible(fn () => $user?->hasRole('admin') || ($user?->can_see_cost ?? false)),
+                    ->badge()
+                    ->color(fn ($state) => $state > 0 ? 'success' : 'danger');
+            }
+        } else {
+            $sellerBranchId = (int) ($user->branch_id ?? 0);
+            $columns[] = Tables\Columns\TextColumn::make('branch_stock')
+                ->label(__('Stock'))
+                ->state(fn (Product $r) => $r->stockForBranch($sellerBranchId))
+                ->sortable()
+                ->badge()
+                ->color(fn ($state) => $state > 0 ? 'success' : 'danger');
+        }
 
-                Tables\Columns\TextColumn::make('weight')->label(__('Weight'))->numeric()->sortable(),
-                Tables\Columns\TextColumn::make('created_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('updated_at')->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
-            ])
+        return $table
+            // ✅ Give Filament an explicit model query so it never tries to resolve from null.
+            ->query(fn () => Product::query()->with('inventories'))
+            ->columns($columns)
             ->actions([
-                // Only admins can edit
                 Tables\Actions\EditAction::make()
                     ->visible(fn () => auth()->user()?->hasRole('admin') ?? false),
             ])
             ->bulkActions([
-                // Only admins get bulk delete
                 Tables\Actions\BulkActionGroup::make([
                     Tables\Actions\DeleteBulkAction::make()
                         ->visible(fn () => auth()->user()?->hasRole('admin') ?? false),
@@ -170,7 +191,10 @@ class ProductResource extends Resource
             ]);
     }
 
-    public static function getRelations(): array { return []; }
+    public static function getRelations(): array
+    {
+        return [];
+    }
 
     public static function getPages(): array
     {
