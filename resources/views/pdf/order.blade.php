@@ -42,9 +42,15 @@
     $subtotal   = (float)($order->subtotal ?? 0);
     $discount   = (float)($order->discount ?? 0);
     $shipping   = (float)($order->shipping ?? 0);
+
+    // If you still support a % service fee (legacy)
     $feesPct    = isset($order->service_fees_percent) ? (float)$order->service_fees_percent : 0;
     $feesVal    = $feesPct ? round(($subtotal - $discount + $shipping) * ($feesPct/100), 2) : 0;
-    $grandTotal = (float)($order->total ?? ($subtotal - $discount + $shipping + $feesVal));
+
+    // NEW: explicit extra fees (flat amount in USD, already included in $order->total by your backend)
+    $extraFees  = (float)($order->extra_fees ?? 0);
+
+    $grandTotal = (float)($order->total ?? ($subtotal - $discount + $shipping + $feesVal + $extraFees));
     $paid       = (float)($order->paid_amount ?? 0);
     $due        = max($grandTotal - $paid, 0);
 
@@ -247,6 +253,15 @@
                 <td class="val"><span class="bidi">{{ $cur }} {{ $fmtFx($feesVal) }}</span></td>
             </tr>
             @endif
+
+            {{-- NEW: show Extra Fees only when non-zero --}}
+            @if($extraFees > 0)
+            <tr>
+                <td class="label">{{ __('Extra Fees') }}</td>
+                <td class="val"><span class="bidi">{{ $cur }} {{ $fmtFx($extraFees) }}</span></td>
+            </tr>
+            @endif
+
             <tr class="grand">
                 <td class="label">{{ __('Total') }}</td>
                 <td class="val"><span class="bidi">{{ $cur }} {{ $fmtFx($grandTotal) }}</span></td>

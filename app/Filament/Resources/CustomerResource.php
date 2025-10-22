@@ -51,12 +51,15 @@ class CustomerResource extends Resource
                         ->default(0.00),
 
                     // Admin can choose the seller
+                    // App/Filament/Resources/CustomerResource.php (form())
                     Forms\Components\Select::make('seller_id')
                         ->label(__('Seller'))
                         ->relationship('seller', 'name')
                         ->preload()
                         ->searchable()
-                        ->visible(fn () => auth()->user()?->hasRole('admin') ?? false),
+                        ->hidden(fn () => auth()->user()?->hasRole('seller') ?? false) // sellers don’t see it
+                        ->required(fn () => auth()->user()?->hasRole('admin') ?? false),
+
 
                     // Seller auto-assigns self
                     Forms\Components\Hidden::make('seller_id')

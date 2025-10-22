@@ -24,16 +24,18 @@ class CreateOrder extends CreateRecord
         if ($rate <= 0) $rate = 1;
         $data['exchange_rate'] = $rate;
 
-        // Totals in USD are canonical (derived once from local via live handlers)
+        // Totals in USD are canonical (percent already converted to USD into extra_fees by the form)
         $subtotalUsd = collect($data['items'] ?? [])
             ->sum(fn ($i) => (float)($i['qty'] ?? 0) * (float)($i['unit_price'] ?? 0));
         $discountUsd = (float)($data['discount'] ?? 0);
         $shippingUsd = (float)($data['shipping'] ?? 0);
+        $extraFeesUsd= (float)($data['extra_fees'] ?? 0);
 
-        $data['subtotal'] = round($subtotalUsd, 2);
-        $data['discount'] = round($discountUsd, 2);
-        $data['shipping'] = round($shippingUsd, 2);
-        $data['total']    = round(max(0, $subtotalUsd - $discountUsd + $shippingUsd), 2);
+        $data['subtotal']   = round($subtotalUsd, 2);
+        $data['discount']   = round($discountUsd, 2);
+        $data['shipping']   = round($shippingUsd, 2);
+        $data['extra_fees'] = round($extraFeesUsd, 2);
+        $data['total']      = round(max(0, $subtotalUsd - $discountUsd + $shippingUsd + $extraFeesUsd), 2);
 
         if (($data['type'] ?? 'proforma') === 'proforma') {
             $data['customer_id'] = $data['customer_id'] ?? null;

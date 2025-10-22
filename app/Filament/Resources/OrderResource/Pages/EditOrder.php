@@ -55,8 +55,6 @@ class EditOrder extends EditRecord
         }
 
         // VERY IMPORTANT: Do NOT touch currency or exchange_rate here.
-        // User input in local currency has already been converted once to USD
-        // by the form handlers. No re-conversion on save.
 
         return $data;
     }
@@ -112,8 +110,6 @@ class EditOrder extends EditRecord
             foreach ($moves as [$b, $p, $d]) {
                 $lines[] = "branch:$b product:$p delta:$d";
             }
-            // You can enable logging here if needed
-            // logger()->debug('[EditOrder] Stock reconcile', ['old' => $old, 'new' => $new, 'moves' => $moves]);
         }
 
         if ($moves) {

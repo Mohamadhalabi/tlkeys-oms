@@ -22,6 +22,9 @@ class Customer extends Model
             if (empty($c->code)) {
                 $c->code = self::generateUniqueCode('TLKC', 6);
             }
+            if (blank($c->seller_id) && auth()->user()?->hasRole('seller')) {
+                $c->seller_id = auth()->id();
+            }
         });
     }
 

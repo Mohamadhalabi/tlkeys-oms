@@ -12,7 +12,9 @@ class Order extends Model
         'branch_id','customer_id','seller_id',
         'type','status','payment_status','paid_amount',
         'subtotal','discount','shipping','total',
-        'currency','exchange_rate',
+        'currency','exchange_rate','extra_fees',
+        'extra_fees_local',
+
     ];
 
     protected $casts = [
@@ -23,6 +25,8 @@ class Order extends Model
         'exchange_rate' => 'decimal:6',
         'paid_amount'   => 'decimal:2',
         'stock_state' => 'array',
+        'extra_fees'        => 'decimal:4',
+        'extra_fees_local'  => 'decimal:4',
     ];
 
     protected static function booted(): void
