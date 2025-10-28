@@ -9,8 +9,8 @@ class OrderItem extends Model
     protected $fillable = ['order_id','product_id','qty','unit_price','line_total','sort'];
 
     protected $casts = [
-        'qty'        => 'decimal:2',
-        'unit_price' => 'decimal:2',
+        'qty'        => 'decimal:3',   // was 2
+        'unit_price' => 'decimal:4',   // was 2  ✅ important
         'line_total' => 'decimal:2',
     ];
 

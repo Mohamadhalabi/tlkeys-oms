@@ -43,6 +43,15 @@ class OrderResource extends \Filament\Resources\Resource
         $canSellBelowCost = (bool) (($user?->can_sell_below_cost ?? false) || $user?->hasRole('admin'));
 
         // ---- Precise helpers (BCMath) ----
+
+
+        $fmt2 = function (string $v): string {
+            // format with integer cents to avoid float conversion
+            $cents = (int) bcmul($v, '100', 0);
+            $sign  = $cents < 0 ? '-' : '';
+            $cents = abs($cents);
+            return $sign . intdiv($cents, 100) . '.' . str_pad((string) ($cents % 100), 2, '0', STR_PAD_LEFT);
+        };
         $m2   = fn ($v) => bcadd((string)$v, '0', 2);               // 2 d.p. string
         $m4   = fn ($v) => bcadd((string)$v, '0', 4);               // 4 d.p. string
         $mul2 = fn ($a, $b) => bcadd(bcmul((string)$a, (string)$b, 8), '0', 2);
@@ -50,8 +59,8 @@ class OrderResource extends \Filament\Resources\Resource
         $div4 = fn ($a, $b) => ($b == 0 || $b === '0') ? '0.0000' : bcadd(bcdiv((string)$a, (string)$b, 12), '0', 4);
 
         // (kept for lightweight derived displays that aren’t edited by user)
-        $r2 = fn ($v) => round((float) $v, 2);
-        $r4 = fn ($v) => round((float) $v, 4);
+        $r2 = fn ($v) => bcadd((string) $v, '0', 2);
+        $r4 = fn ($v) => bcadd((string) $v, '0', 4);
 
         $applyCurrencyOnCreate = function (string $cur, Forms\Get $get, Forms\Set $set, $record) use ($r2, $m2, $mul2) {
             if ($record) return;
@@ -92,20 +101,37 @@ class OrderResource extends \Filament\Resources\Resource
             return $tCache[$p->id][$locale] = $title;
         };
 
-        $compute = function (array $items, float $discountUsd, float $shippingUsd, float $extraFeesUsd, float $rate) use ($r2): array {
-            $subtotalUsd = $r2(collect($items)->sum(function ($row) {
-                $qty  = (float)($row['qty'] ?? 0);
-                $unit = (float)($row['unit_price'] ?? 0);
-                return $qty * $unit;
-            }));
-            $totalUsd = $r2(max(0, $subtotalUsd - $r2($discountUsd) + $r2($shippingUsd) + $r2($extraFeesUsd)));
+        $compute = function (array $items, float $discountUsd, float $shippingUsd, float $extraFeesUsd, float $rate) use ($r2, $r4) : array {
+            // work as strings
+            $subtotalUsd = '0.0000';
+            foreach ($items as $row) {
+                $qty  = (string) ($row['qty'] ?? '0');
+                $unit = (string) ($row['unit_price'] ?? '0');
+                $line = bcmul($qty, $unit, 4);
+                $subtotalUsd = bcadd($subtotalUsd, $line, 4);
+            }
+
+            $discount = $r4((string) $discountUsd);
+            $shipping = $r4((string) $shippingUsd);
+            $extra    = $r4((string) $extraFeesUsd);
+
+            $totalUsd = bcsub($subtotalUsd, $discount, 4);
+            $totalUsd = bcadd($totalUsd, $shipping, 4);
+            $totalUsd = bcadd($totalUsd, $extra, 4);
+            if (bccomp($totalUsd, '0', 4) < 0) $totalUsd = '0.0000';
+
+            $rateS = $r4((string) $rate);
+            $subtotalFx = $r4(bcmul($subtotalUsd, $rateS, 8));
+            $totalFx    = $r4(bcmul($totalUsd,    $rateS, 8));
+
             return [
-                'subtotal_usd' => $subtotalUsd,
-                'total_usd'    => $totalUsd,
-                'subtotal_fx'  => $r2($subtotalUsd * $rate),
-                'total_fx'     => $r2($totalUsd * $rate),
+                'subtotal_usd' => $r2($subtotalUsd),
+                'total_usd'    => $r2($totalUsd),
+                'subtotal_fx'  => $r2($subtotalFx),
+                'total_fx'     => $r2($totalFx),
             ];
         };
+
 
         $setNestedTotals = function (Forms\Set $set, array $t): void {
             $set('../../subtotal', $t['subtotal_usd']);
@@ -796,7 +822,7 @@ class OrderResource extends \Filament\Resources\Resource
 
                                     // Convert to USD (4 d.p.), NO back conversion here
                                     $lineUsd = $m4($div4($lineLocal, $rateS));
-                                    $unitUsd = $m4($div4($lineUsd, (string)$qty));
+                                    $unitUsd = $m4($div4($lineLocal, (string)$qty)); // ✅ 4dp USD
 
                                     // cost guard (compare in USD)
                                     $costUsd = $m4((float) ($get('cost_price') ?? 0));
@@ -1054,40 +1080,45 @@ class OrderResource extends \Filament\Resources\Resource
 
                     Forms\Components\Placeholder::make('subtotal_display')
                         ->label(fn (Forms\Get $get) => __('Subtotal (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) use ($r2) {
-                            $rate  = (float)($get('exchange_rate') ?? 1);
+                        ->content(function (Forms\Get $get) use ($r2, $fmt2) {
+                            $rate  = $r2($get('exchange_rate') ?? '1');
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::query()->select('id')->with(['items:id,order_id,qty,unit_price'])->find($id);
-                                $items = $order
-                                    ? $order->items->map(fn($i) => ['qty' => (float)$i->qty, 'unit_price' => (float)$i->unit_price])->toArray()
-                                    : [];
+                                $items = $order ? $order->items->map(fn($i)=>['qty'=>(string)$i->qty,'unit_price'=>(string)$i->unit_price])->toArray() : [];
                             }
-                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
-                            $fx = $r2($subtotalUsd * $rate);
-                            return new HtmlString('<span class="text-red-600 font-semibold">' . number_format($fx, 2) . '</span>');
+                            $subtotalUsd = '0.0000';
+                            foreach ($items as $r) {
+                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 4), 4);
+                            }
+                            $fx = bcmul($subtotalUsd, $rate, 4);
+                            return new HtmlString('<span class="text-red-600 font-semibold">'.$fmt2($fx).'</span>');
                         })
                         ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
 
                     Forms\Components\Placeholder::make('total_display')
                         ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) use ($r2) {
-                            $rate  = (float) ($get('exchange_rate') ?? 1);
+                        ->content(function (Forms\Get $get) use ($r2, $fmt2) {
+                            $rate  = $r2($get('exchange_rate') ?? '1');
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::query()->select('id','discount','shipping','extra_fees','exchange_rate','currency')->with(['items:id,order_id,qty,unit_price'])->find($id);
-                                $items = $order
-                                    ? $order->items->map(fn($i) => ['qty' => (float)$i->qty, 'unit_price' => (float)$i->unit_price])->toArray()
-                                    : [];
+                                $items = $order ? $order->items->map(fn($i)=>['qty'=>(string)$i->qty,'unit_price'=>(string)$i->unit_price])->toArray() : [];
                             }
-                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
-                            $discountUsd = $r2((float) ($get('discount') ?? 0));
-                            $shippingUsd = $r2((float) ($get('shipping') ?? 0));
-                            $extraUsd    = $r2((float) ($get('extra_fees') ?? 0));
-                            $totalUsd    = $r2(max(0, $subtotalUsd - $discountUsd + $shippingUsd + $extraUsd));
-                            $fx          = $r2($totalUsd * $rate);
+                            $subtotalUsd = '0.0000';
+                            foreach ($items as $r) {
+                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 4), 4);
+                            }
+                            $discountUsd = $r2($get('discount') ?? '0');
+                            $shippingUsd = $r2($get('shipping') ?? '0');
+                            $extraUsd    = $r2($get('extra_fees') ?? '0');
 
-                            return new HtmlString('<span class="text-red-600 font-semibold">' . number_format($fx, 2) . '</span>');
+                            $totalUsd = bcadd(bcsub($subtotalUsd, $discountUsd, 4), $shippingUsd, 4);
+                            $totalUsd = bcadd($totalUsd, $extraUsd, 4);
+                            if (bccomp($totalUsd,'0',4) < 0) $totalUsd = '0.0000';
+
+                            $fx = bcmul($totalUsd, $rate, 4);
+                            return new HtmlString('<span class="text-red-600 font-semibold">'.$fmt2($fx).'</span>');
                         })
                         ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
                 ])
@@ -1129,22 +1160,28 @@ class OrderResource extends \Filament\Resources\Resource
 
                 Tables\Columns\TextColumn::make('shipping_fx')
                     ->label(__('Shipping'))
-                    ->state(fn (Order $r) => number_format(((float)$r->shipping * (float)$r->exchange_rate), 2))
+                    ->state(fn (Order $r) => $fmt2(bcmul((string)$r->shipping, (string)$r->exchange_rate, 4)))
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
 
                 Tables\Columns\TextColumn::make('extra_fees_fx')
                     ->label(__('Extra fees'))
-                    ->state(fn (Order $r) => number_format(((float)$r->extra_fees * (float)$r->exchange_rate), 2))
+                    ->state(fn (Order $r) => $fmt2(bcmul((string)$r->extra_fees, (string)$r->exchange_rate, 4)))
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
 
                 Tables\Columns\TextColumn::make('total_fx')
                     ->label(__('Total (Currency)'))
-                    ->state(function (Order $r) {
-                        $subtotalUsd = (float) $r->items->sum(fn ($i) => (float)$i->qty * (float)$i->unit_price);
-                        $totalUsd    = max(0, $subtotalUsd - (float)$r->discount + (float)$r->shipping + (float)$r->extra_fees);
-                        return number_format($totalUsd * (float)$r->exchange_rate, 2);
+                    ->state(function (Order $r) use ($fmt2) {
+                        $subtotalUsd = '0.0000';
+                        foreach ($r->items as $i) {
+                            $subtotalUsd = bcadd($subtotalUsd, bcmul((string)$i->qty, (string)$i->unit_price, 4), 4);
+                        }
+                        $totalUsd = bcadd(bcsub($subtotalUsd, (string)$r->discount, 4), (string)$r->shipping, 4);
+                        $totalUsd = bcadd($totalUsd, (string)$r->extra_fees, 4);
+                        if (bccomp($totalUsd,'0',4) < 0) $totalUsd = '0.0000';
+                        $fx = bcmul($totalUsd, (string)$r->exchange_rate, 4);
+                        return $fmt2($fx);
                     })
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
