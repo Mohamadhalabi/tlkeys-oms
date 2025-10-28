@@ -158,6 +158,42 @@ class OrderResource extends \Filament\Resources\Resource
             return $imgCache[$p->id] = $url;
         };
 
+        /**
+         * Fast in-memory normalizer for the Repeater state:
+         * - If a new row was added, move it to the top.
+         * - If rows were removed or reordered, collapse gaps and reindex.
+         * - Always rewrite consecutive __index and sort = 1..N.
+         */
+        $normalizeItems = function (array $items): array {
+            if (empty($items)) return $items;
+
+            // Keys are the row UUIDs Filament uses internally; maintain those.
+            $keys = array_keys($items);
+
+            // Detect "new last row" (Filament appends new rows at the end).
+            $lastKey = end($keys);
+            $isNewEmptyRow =
+                $lastKey !== false
+                && (!isset($items[$lastKey]['product_id']) || empty($items[$lastKey]['product_id']))
+                && (!isset($items[$lastKey]['qty']) || (int)($items[$lastKey]['qty'] ?? 1) === 1)
+                && (!isset($items[$lastKey]['unit_price']) || (float)($items[$lastKey]['unit_price'] ?? 0.0) === 0.0);
+
+            // If new row added, bring last to the top for better UX.
+            if ($isNewEmptyRow) {
+                $items = [$lastKey => $items[$lastKey]] + array_diff_key($items, [$lastKey => true]);
+            }
+
+            // Reindex __index + sort (1..N) in the current order (top -> bottom).
+            $i = 1;
+            foreach (array_keys($items) as $k) {
+                $items[$k]['__index'] = $i;
+                $items[$k]['sort']    = $i; // persisted sort column
+                $i++;
+            }
+
+            return $items;
+        };
+
         return $form->schema([
             Forms\Components\Section::make(__('Order Info'))
                 ->schema([
@@ -432,8 +468,11 @@ class OrderResource extends \Filament\Resources\Resource
 
             Forms\Components\Section::make(__('Items'))
                 ->schema([
-                    // Track count to detect "new row added" and move it to top
+                    // Track count & a version to detect add/remove quickly
                     Forms\Components\Hidden::make('__items_last_count')
+                        ->default(0)
+                        ->dehydrated(false),
+                    Forms\Components\Hidden::make('__items_version')
                         ->default(0)
                         ->dehydrated(false),
 
@@ -441,50 +480,31 @@ class OrderResource extends \Filament\Resources\Resource
                         ->label(__('Items'))
                         ->addActionLabel(__('Add item'))
                         ->relationship()
-                        ->live(debounce: 250)
+                        ->live(debounce: 150) // a bit faster than 250ms
                         ->reorderable()
                         ->orderColumn('sort')
-                        ->afterStateHydrated(function (?array $state, Forms\Get $get, Forms\Set $set) {
+                        // NOTE: the normalizer is called both on hydrate and on any update
+                        ->afterStateHydrated(function (?array $state, Forms\Get $get, Forms\Set $set) use ($normalizeItems) {
                             $items = (array)($state ?? $get('items') ?? []);
-                            $idx = 1;
-                            foreach ($items as $key => $_row) {
-                                $set("items.$key.__index", $idx++);
-                            }
-                            // set last count for add-detection
+                            $items = $normalizeItems($items);
+                            $set('items', $items);
                             $set('../../__items_last_count', count($items));
+                            $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
-                        ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals, $extraFromPercent) {
+                        ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals, $extraFromPercent, $normalizeItems, $r2) {
+                            // Normalize order & indices on *any* change (add, remove, manual reorder)
                             $items = (array)($state ?? $get('items') ?? []);
                             $prevCount = (int) ($get('../../__items_last_count') ?? 0);
-                            $newCount  = count($items);
 
-                            // If a new row was added, move it to the top and fix sort
-                            if ($newCount > $prevCount && $newCount > 0) {
-                                $keys = array_keys($items);
-                                $lastKey = end($keys);
+                            $items = $normalizeItems($items);
 
-                                $moved = [$lastKey => $items[$lastKey]] + array_diff_key($items, [$lastKey => true]);
-                                $set('items', $moved);
+                            // Apply normalized array once
+                            $set('items', $items);
 
-                                $i = 1;
-                                foreach (array_keys($moved) as $k) {
-                                    $set("items.$k.__index", $i);
-                                    $set("items.$k.sort", $i); // keep DB order
-                                    $i++;
-                                }
-
-                                // use the new order for totals below
-                                $items = $moved;
-                            }
-
-                            // refresh human index
-                            $idx = 1;
-                            foreach ($items as $key => $_row) {
-                                $set("items.$key.__index", $idx++);
-                            }
-
-                            // recompute totals + extra fees %
+                            // recompute totals + extra fees % (cheap math only)
                             $rate     = (float) ($get('../../exchange_rate') ?? 1);
+                            if ($rate <= 0) $rate = 1;
+
                             $extraUsd = $extraFromPercent($get);
                             $set('../../extra_fees', $extraUsd);
 
@@ -497,8 +517,12 @@ class OrderResource extends \Filament\Resources\Resource
                             );
                             $setNestedTotals($set, $t);
 
-                            // update our last-count tracker
-                            $set('../../__items_last_count', $newCount);
+                            // Update trackers only if count changed (add/remove)
+                            $newCount = count($items);
+                            if ($newCount !== $prevCount) {
+                                $set('../../__items_last_count', $newCount);
+                            }
+                            $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
                         ->columns([
                             'default' => 1,
@@ -576,7 +600,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             $qq->whereRaw('LOWER(sku) LIKE ?', ["%{$s}%"]);
                                             $qq->orWhereRaw('LOWER(title) LIKE ?', ["%{$s}%"]);
                                             $qq->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(title, '$.\"$locale\"'))) LIKE ?", ["%{$s}%"])
-                                            ->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(title, '$.\"en\"'))) LIKE ?", ["%{$s}%"]);
+                                               ->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(title, '$.\"en\"'))) LIKE ?", ["%{$s}%"]);
                                         });
                                     }
 
@@ -588,7 +612,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->mapWithKeys(function (\App\Models\Product $p) use ($titleFor, $locale, $max) {
                                             $title = trim($titleFor($p, $locale));
                                             if ($title === '') {
-                                                // fallback if no title: still show SKU, but trimmed (rare)
                                                 $label = mb_strlen($p->sku ?? '') <= $max ? ($p->sku ?? '') : (mb_substr($p->sku ?? '', 0, $max - 3) . '...');
                                             } else {
                                                 $label = mb_strlen($title) <= $max ? $title : (mb_substr($title, 0, $max - 3) . '...');
@@ -608,14 +631,12 @@ class OrderResource extends \Filament\Resources\Resource
                                     $title = trim($titleFor($p, $locale));
 
                                     if ($title === '') {
-                                        // fallback if no title: show SKU (trimmed)
                                         $sku = trim((string)($p->sku ?? ''));
                                         return mb_strlen($sku) <= $max ? $sku : (mb_substr($sku, 0, $max - 3) . '...');
                                     }
 
                                     return mb_strlen($title) <= $max ? $title : (mb_substr($title, 0, $max - 3) . '...');
                                 })
-
 
                                 ->required()
                                 ->reactive()
@@ -702,7 +723,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         $prod = $getProduct($pid);
                                         $sku  = trim((string)($prod->sku ?? ''));
                                         if ($sku !== '') {
-                                            // orange-500 (#f97316)
                                             $pieces[] = '<span style="color:#f97316;font-weight:600;">SKU: ' . e($sku) . '</span>';
                                         }
 
@@ -726,8 +746,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         '<div>' . implode(' — ', $pieces) . '</div>'
                                     );
                                 }),
-
-
 
                             Forms\Components\TextInput::make('qty')
                                 ->label(__('Qty'))
@@ -991,19 +1009,13 @@ class OrderResource extends \Filament\Resources\Resource
                         ->rule('decimal:0,2')
                         ->dehydrated(false)
                         ->live(onBlur: true)
-
-                        // NEW: when editing, show the saved % by deriving it from stored extra_fees
                         ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($r2) {
-                            // if user hasn't typed anything yet, derive % from DB values
                             if ($state !== null && $state !== '') return;
 
-                            // get stored USD extra fees (from state or record)
                             $extraUsd = (float) ($get('extra_fees') ?? ($record->extra_fees ?? 0));
 
-                            // base = Subtotal - Discount  (keep this consistent with your $extraFromPercent helper)
                             $items = (array) ($get('items') ?? []);
                             $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
-                            // When landing on edit, items can be empty if not preloaded; fall back to record->items
                             if ($subtotalUsd <= 0 && $record?->relationLoaded('items')) {
                                 $subtotalUsd = $r2((float) $record->items->sum(fn ($i) => (float)$i->qty * (float)$i->unit_price));
                             }
@@ -1016,7 +1028,6 @@ class OrderResource extends \Filament\Resources\Resource
                                 $set('extra_fees_percent', $pct);
                             }
                         })
-
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $extraFromPercent) {
                             $extraUsd = $extraFromPercent($get);
                             $set('extra_fees', $extraUsd);
@@ -1031,7 +1042,6 @@ class OrderResource extends \Filament\Resources\Resource
                         })
                         ->helperText(__('Applies to (Subtotal − Discount).'))
                         ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 5]),
-
 
                     Forms\Components\Placeholder::make('exchange_rate_info')
                         ->label(__('Exchange rate'))
