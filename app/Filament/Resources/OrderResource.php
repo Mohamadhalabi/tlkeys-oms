@@ -821,8 +821,8 @@ class OrderResource extends \Filament\Resources\Resource
                                     $lineLocal = $m2($mul2($localUnit, (string)$qty));
 
                                     // Convert to USD (4 d.p.), NO back conversion here
-                                    $lineUsd = $m4($div4($lineLocal, $rateS));
-                                    $unitUsd = $m4($div4($lineLocal, (string)$qty)); // ✅ 4dp USD
+                                    $unitUsd = $m4($div4($localUnit, $rateS));          // USD per unit
+                                    $lineUsd = $m4($mul4($unitUsd, (string)$qty));      // USD line total
 
                                     // cost guard (compare in USD)
                                     $costUsd = $m4((float) ($get('cost_price') ?? 0));
