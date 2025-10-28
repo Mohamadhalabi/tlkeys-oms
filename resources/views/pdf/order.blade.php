@@ -1,3 +1,4 @@
+{{-- resources/views/pdf/order.blade.php --}}
 @php
     use Illuminate\Support\Str;
 
@@ -5,8 +6,24 @@
     $locale = app()->getLocale();
     $isRtl  = ($locale === 'ar');
 
-    // Formatters
-    $fmt = fn($v) => number_format((float) $v, 2, '.', ',');
+    /* ========= Exact, half-up math helpers (match Filament) ========= */
+    $r2 = function ($v) {
+        $v = (string) $v;
+        return bccomp($v, '0', 10) >= 0
+            ? bcadd(bcadd($v, '0.005', 5), '0', 2)
+            : bcadd(bcsub($v, '0.005', 5), '0', 2);
+    };
+    $r4 = function ($v) {
+        $v = (string) $v;
+        return bccomp($v, '0', 10) >= 0
+            ? bcadd(bcadd($v, '0.00005', 5), '0', 4)
+            : bcadd(bcsub($v, '0.00005', 5), '0', 4);
+    };
+    $mul2 = fn($a, $b) => $r2(bcmul((string)$a, (string)$b, 6));
+    $mul4 = fn($a, $b) => $r4(bcmul((string)$a, (string)$b, 10));
+
+    // Printers
+    $fmt2  = fn($v) => number_format((float)$r2($v), 2, '.', ',');
     $fmtPct = function ($v) { $s = number_format((float)$v, 2, '.', ','); return rtrim(rtrim($s, '0'), '.'); };
 
     // Build mPDF-friendly path helper (keeps file://, data:, absolute, storage/public)
@@ -36,20 +53,23 @@
     // Snapshot FX context (display only; DB stays USD)
     $rate = max(1.0, (float)($order->exchange_rate ?? 1));
     $cur  = $order->currency ?: 'USD';
-    $fmtFx = fn($usd) => $fmt(((float)$usd) * $rate);
+
+    // USD → Currency with BCMath + half-up 2dp
+    $fmtFx = fn($usd) => $fmt2(bcmul((string)$usd, (string)$rate, 6));
 
     // Money in USD from DB
     $subtotal   = (float)($order->subtotal ?? 0);
     $discount   = (float)($order->discount ?? 0);
     $shipping   = (float)($order->shipping ?? 0);
 
-    // If you still support a % service fee (legacy)
+    // Legacy % service fee (if present)
     $feesPct    = isset($order->service_fees_percent) ? (float)$order->service_fees_percent : 0;
-    $feesVal    = $feesPct ? round(($subtotal - $discount + $shipping) * ($feesPct/100), 2) : 0;
+    $feesVal    = $feesPct ? (float)$r2(bcmul((string)($subtotal - $discount + $shipping), (string)($feesPct/100), 6)) : 0;
 
-    // NEW: explicit extra fees (flat amount in USD, already included in $order->total by your backend)
+    // New explicit extra fees (flat USD)
     $extraFees  = (float)($order->extra_fees ?? 0);
 
+    // Grand total in USD (already computed & saved in your backend)
     $grandTotal = (float)($order->total ?? ($subtotal - $discount + $shipping + $feesVal + $extraFees));
     $paid       = (float)($order->paid_amount ?? 0);
     $due        = max($grandTotal - $paid, 0);
@@ -208,11 +228,12 @@
         <tbody>
             @foreach($order->items as $i => $row)
                 @php
-                    $p     = $row->product;
-                    $sku   = $p->sku ?? ($row->sku ?? '-');
-                    $src   = $imgMap[$row->product_id] ?? null; // already "file://..." or data:
-                    $title = $pickTitle($p, $row->title ?? '');
-                    $line  = $row->line_total ?? ($row->qty * $row->unit_price); // USD
+                    $p       = $row->product;
+                    $sku     = $p->sku ?? ($row->sku ?? '-');
+                    $src     = $imgMap[$row->product_id] ?? null; // already "file://..." or data:
+                    $title   = $pickTitle($p, $row->title ?? '');
+                    // Exact USD line total
+                    $lineUsd = $row->line_total ?? bcmul((string)$row->qty, (string)$row->unit_price, 6);
                 @endphp
                 <tr>
                     <td style="text-align:center;">{{ $i + 1 }}</td>
@@ -225,7 +246,7 @@
                     <td class="sku">{{ $sku ?: '—' }}</td>
                     <td class="qty">{{ (int)$row->qty }}</td>
                     <td class="right"><span class="">{{ $cur }} {{ $fmtFx($row->unit_price) }}</span></td>
-                    <td class="right"><span class="">{{ $cur }} {{ $fmtFx($line) }}</span></td>
+                    <td class="right"><span class="">{{ $cur }} {{ $fmtFx($lineUsd) }}</span></td>
                 </tr>
             @endforeach
         </tbody>
@@ -254,7 +275,6 @@
             </tr>
             @endif
 
-            {{-- NEW: show Extra Fees only when non-zero --}}
             @if($extraFees > 0)
             <tr>
                 <td class="label">{{ __('Extra Fees') }}</td>
