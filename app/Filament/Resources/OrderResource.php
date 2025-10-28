@@ -62,7 +62,7 @@ class OrderResource extends \Filament\Resources\Resource
 
                 $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
                 $set("items.$i.line_total_local", $r2($usdLine * $rate));
-                $set("items.$i.__currency_mirror", microtime(true));
+                $set("items.$i::__currency_mirror", microtime(true));
             }
         };
 
@@ -153,19 +153,12 @@ class OrderResource extends \Filament\Resources\Resource
             return $imgCache[$p->id] = $url;
         };
 
+        /**
+         * Keep whatever order Filament provides (append-last).
+         * Only refresh __index and sort to be 1..N, in that same order.
+         */
         $normalizeItems = function (array $items): array {
             if (empty($items)) return $items;
-            $keys = array_keys($items);
-            $lastKey = end($keys);
-            $isNewEmptyRow =
-                $lastKey !== false
-                && (!isset($items[$lastKey]['product_id']) || empty($items[$lastKey]['product_id']))
-                && (!isset($items[$lastKey]['qty']) || (int)($items[$lastKey]['qty'] ?? 1) === 1)
-                && (!isset($items[$lastKey]['unit_price']) || (float)($items[$lastKey]['unit_price'] ?? 0.0) === 0.0);
-
-            if ($isNewEmptyRow) {
-                $items = [$lastKey => $items[$lastKey]] + array_diff_key($items, [$lastKey => true]);
-            }
 
             $i = 1;
             foreach (array_keys($items) as $k) {
@@ -290,9 +283,12 @@ class OrderResource extends \Filament\Resources\Resource
 
                             $q = Customer::query();
 
-                            // Sellers see only their own customers; admins/others see all.
+                            // Sellers: show their customers + unassigned
                             if ($isSeller) {
-                                $q->where('seller_id', $user->id);
+                                $q->where(function ($w) use ($user) {
+                                    $w->where('seller_id', $user->id)
+                                      ->orWhereNull('seller_id');
+                                });
                             }
 
                             $search = trim($search);
@@ -318,7 +314,10 @@ class OrderResource extends \Filament\Resources\Resource
 
                             $q = Customer::query()->whereKey($value);
                             if ($isSeller) {
-                                $q->where('seller_id', $user->id);
+                                $q->where(function ($w) use ($user) {
+                                    $w->where('seller_id', $user->id)
+                                      ->orWhereNull('seller_id');
+                                });
                             }
 
                             return $q->value('name');
@@ -330,11 +329,12 @@ class OrderResource extends \Filament\Resources\Resource
                             $user = auth()->user();
                             $isSeller = $user?->hasRole('seller');
 
-                            // Validation respects the same visibility rule.
                             if ($isSeller) {
                                 return [
                                     'required',
-                                    Rule::exists('customers', 'id')->where(fn ($q) => $q->where('seller_id', $user->id)),
+                                    Rule::exists('customers', 'id')->where(
+                                        fn ($q) => $q->where('seller_id', $user->id)->orWhereNull('seller_id')
+                                    ),
                                 ];
                             }
 
@@ -479,9 +479,6 @@ class OrderResource extends \Filament\Resources\Resource
 
             Forms\Components\Section::make(__('Items'))
                 ->schema([
-                    Forms\Components\Hidden::make('__items_last_count')
-                        ->default(0)
-                        ->dehydrated(false),
                     Forms\Components\Hidden::make('__items_version')
                         ->default(0)
                         ->dehydrated(false),
@@ -495,15 +492,13 @@ class OrderResource extends \Filament\Resources\Resource
                         ->orderColumn('sort')
                         ->afterStateHydrated(function (?array $state, Forms\Get $get, Forms\Set $set) use ($normalizeItems) {
                             $items = (array)($state ?? $get('items') ?? []);
-                            $items = $normalizeItems($items);
+                            $items = $normalizeItems($items);       // keep order, refresh indices
                             $set('items', $items);
-                            $set('../../__items_last_count', count($items));
                             $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
                         ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals, $extraFromPercent, $normalizeItems, $r2) {
                             $items = (array)($state ?? $get('items') ?? []);
-                            $prevCount = (int) ($get('../../__items_last_count') ?? 0);
-                            $items = $normalizeItems($items);
+                            $items = $normalizeItems($items);       // keep order, refresh indices
                             $set('items', $items);
 
                             $rate     = (float) ($get('../../exchange_rate') ?? 1);
@@ -521,10 +516,6 @@ class OrderResource extends \Filament\Resources\Resource
                             );
                             $setNestedTotals($set, $t);
 
-                            $newCount = count($items);
-                            if ($newCount !== $prevCount) {
-                                $set('../../__items_last_count', $newCount);
-                            }
                             $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
                         ->columns([
