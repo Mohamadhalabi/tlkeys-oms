@@ -121,8 +121,9 @@ class OrderResource extends \Filament\Resources\Resource
                 $qty     = (string) ($get("items.$i.qty") ?? '0');
                 $usdLine = (string) ($get("items.$i.line_total") ?? self::mul4($qty, $usdUnit));
 
-                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
-                $set("items.$i.line_total_local", $r2($mul2($usdLine, $rate)));
+                $localUnit = $r2($mul2($usdUnit, $rate));
+                $set("items.$i.unit_price_local", $localUnit);
+                $set("items.$i.line_total_local", $r2($mul2($localUnit, $qty)));
                 $set("items.$i::__currency_mirror", microtime(true));
             }
         };
@@ -266,9 +267,11 @@ class OrderResource extends \Filament\Resources\Resource
                                 $qty     = (string) ($get("items.$i.qty") ?? '0');
                                 $usdLine = (string) ($get("items.$i.line_total") ?? self::mul4($qty, $usdUnit));
 
-                                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
-                                $set("items.$i.line_total_local", $r2($mul2($usdLine, $rate)));
+                                $localUnit = $r2($mul2($usdUnit, $rate));
+                                $set("items.$i.unit_price_local", $localUnit);
+                                $set("items.$i.line_total_local", $r2($mul2($localUnit, $qty)));
                                 $set("items.$i.__currency_mirror", microtime(true));
+
                             }
                         })
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($mul2, $r2) {
@@ -286,8 +289,9 @@ class OrderResource extends \Filament\Resources\Resource
                                 $qty     = (string) ($get("items.$i.qty") ?? '0');
                                 $usdLine = (string) ($get("items.$i.line_total") ?? '0');
 
-                                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
-                                $set("items.$i.line_total_local", $r2($mul2($usdLine !== '0' ? $usdLine : self::mul4($usdUnit, $qty), $rate)));
+                                $localUnit = $r2($mul2($usdUnit, $rate));
+                                $set("items.$i.unit_price_local", $localUnit);
+                                $set("items.$i.line_total_local", $r2($mul2($localUnit, $qty)));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
@@ -848,9 +852,13 @@ class OrderResource extends \Filament\Resources\Resource
                                     if (((float)$rate) <= 0) $rate = '1';
                                     $usd  = (string)($get('unit_price') ?? '0');
                                     $qty  = (string)($get('qty') ?? '1');
-                                    $set('unit_price_local', $r2($mul2($usd, $rate)));
-                                    $set('line_total_local', $r2(self::mul2(($get('line_total') ?? self::mul4($usd,$qty)), $rate)));
+
+                                    // Authoritative: local line = qty × local unit (both 2dp)
+                                    $localUnit = $r2($mul2($usd, $rate));
+                                    $set('unit_price_local', $localUnit);
+                                    $set('line_total_local', $r2($mul2($localUnit, $qty)));
                                 })
+
                                 ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $r2, $r4, $mul2, $mul4, $div4, $extraFromPercent) {
                                     $qty   = (int) max(1, (float) ($get('qty') ?? 1));
                                     $rateS = (string) ($get('../../exchange_rate') ?? '1');
