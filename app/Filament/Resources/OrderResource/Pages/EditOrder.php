@@ -6,6 +6,7 @@ use App\Filament\Resources\OrderResource;
 use App\Models\ProductBranch;
 use Filament\Resources\Pages\EditRecord;
 use Filament\Notifications\Notification;
+use Filament\Notifications\Actions\Action as NotificationAction;
 use Illuminate\Support\Facades\DB;
 
 class EditOrder extends EditRecord
@@ -74,6 +75,9 @@ class EditOrder extends EditRecord
             if ($this->debug) {
                 Notification::make()->title('Stock: no change')->body('State unchanged.')->success()->send();
             }
+
+            // Still show the action popup for convenience
+            $this->showSavedActions();
             return;
         }
 
@@ -149,5 +153,30 @@ class EditOrder extends EditRecord
 
         // Persist NEW as last reconciled for idempotency
         $this->record->forceFill(['stock_state' => $new])->saveQuietly();
+
+        // Show post-save actions popup
+        $this->showSavedActions();
+    }
+
+    protected function showSavedActions(): void
+    {
+        $pdfUrl = route('admin.orders.pdf', $this->record) . '?lang=' . app()->getLocale();
+
+        Notification::make()
+            ->title(__('Order saved'))
+            ->body(__('What would you like to do next?'))
+            ->success()
+            ->persistent()
+            ->actions([
+                NotificationAction::make('download_pdf')
+                    ->label(__('Download PDF'))
+                    ->url($pdfUrl, shouldOpenInNewTab: true)
+                    ->button(),
+                NotificationAction::make('close_popup')
+                    ->label(__('Close'))
+                    ->button()
+                    ->close(),
+            ])
+            ->send();
     }
 }

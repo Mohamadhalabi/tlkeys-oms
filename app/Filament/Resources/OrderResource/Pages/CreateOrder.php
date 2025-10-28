@@ -4,6 +4,8 @@ namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
 use Filament\Resources\Pages\CreateRecord;
+use Filament\Notifications\Notification;
+use Filament\Notifications\Actions\Action as NotificationAction;
 use Illuminate\Support\Facades\DB;
 
 class CreateOrder extends CreateRecord
@@ -58,7 +60,7 @@ class CreateOrder extends CreateRecord
 
     protected function afterCreate(): void
     {
-        \Illuminate\Support\Facades\DB::transaction(function () {
+        DB::transaction(function () {
             $order    = $this->record->loadMissing('items');
             $branchId = (int) $order->branch_id;
 
@@ -75,6 +77,26 @@ class CreateOrder extends CreateRecord
 
             $order->syncWallet();
         });
+
+        // ---- Persistent pop-up with actions ----
+        $pdfUrl = route('admin.orders.pdf', $this->record) . '?lang=' . app()->getLocale();
+
+        Notification::make()
+            ->title(__('Order created'))
+            ->body(__('What would you like to do next?'))
+            ->success()
+            ->persistent() // don’t auto-dismiss
+            ->actions([
+                NotificationAction::make('download_pdf')
+                    ->label(__('Download PDF'))
+                    ->url($pdfUrl, shouldOpenInNewTab: true)
+                    ->button(),
+                NotificationAction::make('close_popup')
+                    ->label(__('Close'))
+                    ->button()
+                    ->close(),
+            ])
+            ->send();
     }
 
     /** same robust helper as in EditOrder */

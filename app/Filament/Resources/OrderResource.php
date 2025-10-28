@@ -42,26 +42,34 @@ class OrderResource extends \Filament\Resources\Resource
         $canSeeCost       = (bool) (($user?->can_see_cost ?? false) || $user?->hasRole('admin'));
         $canSellBelowCost = (bool) (($user?->can_sell_below_cost ?? false) || $user?->hasRole('admin'));
 
+        // ---- Precise helpers (BCMath) ----
+        $m2   = fn ($v) => bcadd((string)$v, '0', 2);               // 2 d.p. string
+        $m4   = fn ($v) => bcadd((string)$v, '0', 4);               // 4 d.p. string
+        $mul2 = fn ($a, $b) => bcadd(bcmul((string)$a, (string)$b, 8), '0', 2);
+        $mul4 = fn ($a, $b) => bcadd(bcmul((string)$a, (string)$b, 12), '0', 4);
+        $div4 = fn ($a, $b) => ($b == 0 || $b === '0') ? '0.0000' : bcadd(bcdiv((string)$a, (string)$b, 12), '0', 4);
+
+        // (kept for lightweight derived displays that aren’t edited by user)
         $r2 = fn ($v) => round((float) $v, 2);
         $r4 = fn ($v) => round((float) $v, 4);
 
-        $applyCurrencyOnCreate = function (string $cur, Forms\Get $get, Forms\Set $set, $record) use ($r2) {
+        $applyCurrencyOnCreate = function (string $cur, Forms\Get $get, Forms\Set $set, $record) use ($r2, $m2, $mul2) {
             if ($record) return;
             $set('currency', $cur);
-            $rate = (float) CurrencyRate::getRate($cur ?: 'USD');
-            if ($rate <= 0) { $rate = 1; }
+            $rate = (string) CurrencyRate::getRate($cur ?: 'USD');
+            if (((float)$rate) <= 0) { $rate = '1'; }
 
-            $set('exchange_rate', $rate);
-            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
-            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
+            $set('exchange_rate', (float)$rate);
+            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
+            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
 
             foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
-                $qty     = (float) ($get("items.$i.qty") ?? 0);
-                $usdLine = (float) ($get("items.$i.line_total") ?? ($qty * $usdUnit));
+                $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
+                $qty     = (string) ($get("items.$i.qty") ?? '0');
+                $usdLine = (string) ($get("items.$i.line_total") ?? $mul4($qty, $usdUnit));
 
-                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
-                $set("items.$i.line_total_local", $r2($usdLine * $rate));
+                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
+                $set("items.$i.line_total_local", $m2($mul2($usdLine, $rate)));
                 $set("items.$i::__currency_mirror", microtime(true));
             }
         };
@@ -153,20 +161,14 @@ class OrderResource extends \Filament\Resources\Resource
             return $imgCache[$p->id] = $url;
         };
 
-        /**
-         * Keep whatever order Filament provides (append-last).
-         * Only refresh __index and sort to be 1..N, in that same order.
-         */
         $normalizeItems = function (array $items): array {
             if (empty($items)) return $items;
-
             $i = 1;
             foreach (array_keys($items) as $k) {
                 $items[$k]['__index'] = $i;
                 $items[$k]['sort']    = $i;
                 $i++;
             }
-
             return $items;
         };
 
@@ -183,40 +185,43 @@ class OrderResource extends \Filament\Resources\Resource
                         })
                         ->default('USD')
                         ->reactive()
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($r2) {
-                            if ($record && $record->exchange_rate > 0) {
-                                $rate = (float) $record->exchange_rate;
-                            } else {
-                                $rate = (float) CurrencyRate::getRate($state ?: 'USD');
-                            }
-                            if ($rate <= 0) $rate = 1;
+                        // hydrate with precise local values from USD once
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($r2, $m2, $mul2) {
+                            $rate = (string) (($record && $record->exchange_rate > 0) ? $record->exchange_rate : CurrencyRate::getRate($state ?: 'USD'));
+                            if (((float)$rate) <= 0) $rate = '1';
 
-                            $set('exchange_rate', $rate);
-                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
-                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
+                            $set('exchange_rate', (float)$rate);
+                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
+                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
 
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
-                                $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
-                                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
-                                $set("items.$i.line_total_local", $r2($usdLine * $rate));
+                                $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
+                                $qty     = (string) ($get("items.$i.qty") ?? '0');
+                                $usdLine = (string) ($get("items.$i.line_total") ?? (string)$r2(((float)$qty) * ((float)$usdUnit)));
+
+                                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
+                                $set("items.$i.line_total_local", $m2($mul2($usdLine, $rate)));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($r2) {
-                            if ($record) return;
+                        // when currency really changes, recompute *local* from USD (one-way)
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($m2, $mul2) {
+                            if ($record) return; // don't change existing orders' money
 
-                            $rate = (float) CurrencyRate::getRate($state ?: 'USD');
-                            if ($rate <= 0) $rate = 1;
+                            $rate = (string) CurrencyRate::getRate($state ?: 'USD');
+                            if (((float)$rate) <= 0) $rate = '1';
 
-                            $set('exchange_rate', $rate);
-                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
-                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
+                            $set('exchange_rate', (float)$rate);
+                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
+                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
+
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
-                                $usdUnit = (float) ($get("items.$i.unit_price") ?? 0);
-                                $usdLine = (float) ($get("items.$i.line_total") ?? ((float)$get("items.$i.qty") * $usdUnit));
-                                $set("items.$i.unit_price_local", $r2($usdUnit * $rate));
-                                $set("items.$i.line_total_local", $r2($usdLine * $rate));
+                                $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
+                                $qty     = (string) ($get("items.$i.qty") ?? '0');
+                                $usdLine = (string) ($get("items.$i.line_total") ?? '0');
+
+                                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
+                                $set("items.$i.line_total_local", $m2($mul2($usdLine !== '0' ? $usdLine : $mul2($usdUnit, $qty), $rate)));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
@@ -283,7 +288,6 @@ class OrderResource extends \Filament\Resources\Resource
 
                             $q = Customer::query();
 
-                            // Sellers: show their customers + unassigned
                             if ($isSeller) {
                                 $q->where(function ($w) use ($user) {
                                     $w->where('seller_id', $user->id)
@@ -319,7 +323,6 @@ class OrderResource extends \Filament\Resources\Resource
                                       ->orWhereNull('seller_id');
                                 });
                             }
-
                             return $q->value('name');
                         })
                         ->required(fn (Forms\Get $get) => $get('type') === 'order')
@@ -492,13 +495,13 @@ class OrderResource extends \Filament\Resources\Resource
                         ->orderColumn('sort')
                         ->afterStateHydrated(function (?array $state, Forms\Get $get, Forms\Set $set) use ($normalizeItems) {
                             $items = (array)($state ?? $get('items') ?? []);
-                            $items = $normalizeItems($items);       // keep order, refresh indices
+                            $items = $normalizeItems($items);
                             $set('items', $items);
                             $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
                         ->afterStateUpdated(function (?array $state, Forms\Set $set, Forms\Get $get) use ($compute, $setNestedTotals, $extraFromPercent, $normalizeItems, $r2) {
                             $items = (array)($state ?? $get('items') ?? []);
-                            $items = $normalizeItems($items);       // keep order, refresh indices
+                            $items = $normalizeItems($items);
                             $set('items', $items);
 
                             $rate     = (float) ($get('../../exchange_rate') ?? 1);
@@ -515,7 +518,6 @@ class OrderResource extends \Filament\Resources\Resource
                                 $rate
                             );
                             $setNestedTotals($set, $t);
-
                             $set('../../__items_version', ((int)$get('../../__items_version')) + 1);
                         })
                         ->columns([
@@ -768,51 +770,59 @@ class OrderResource extends \Filament\Resources\Resource
                                     $setNestedTotals($set, $t);
                                 }),
 
+                            // ***** KEY CHANGE: precise one-way local -> USD conversion with BCMath *****
                             Forms\Components\TextInput::make('unit_price_local')
                                 ->label(fn (Forms\Get $get) => __('Unit price (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
                                 ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
                                 ->numeric()->step('0.01')->inputMode('decimal')
                                 ->rule('decimal:0,2')
                                 ->live(onBlur: true)
-                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
-                                    $rate = (float)($get('../../exchange_rate') ?? 1);
-                                    if ($rate <= 0) $rate = 1;
-                                    $usd  = (float)($get('unit_price') ?? 0);
-                                    $qty  = (float)($get('qty') ?? 1);
-                                    $set('unit_price_local', $r2($usd * $rate));
-                                    $set('line_total_local', $r2($qty * $usd * $rate));
+                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                                    $rate = (string)($get('../../exchange_rate') ?? '1');
+                                    if (((float)$rate) <= 0) $rate = '1';
+                                    $usd  = (string)($get('unit_price') ?? '0');
+                                    $qty  = (string)($get('qty') ?? '1');
+                                    $set('unit_price_local', $m2($mul2($usd, $rate)));
+                                    $set('line_total_local', $m2($mul2((string)($get('line_total') ?? $mul2($usd,$qty)), $rate)));
                                 })
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $r2, $r4, $extraFromPercent) {
-                                    $rate = (float) ($get('../../exchange_rate') ?? 1);
-                                    if ($rate <= 0) $rate = 1;
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $m2, $m4, $mul2, $mul4, $div4, $extraFromPercent) {
+                                    // authoritative local from user
+                                    $qty   = (int) max(1, (float) ($get('qty') ?? 1));
+                                    $rateS = (string) ($get('../../exchange_rate') ?? '1');
+                                    if (((float)$rateS) <= 0) $rateS = '1';
 
-                                    $localUnit = $r2((float) $state);
-                                    $qty       = max(0, (float) ($get('qty') ?? 1));
+                                    $localUnit = $m2($state);
+                                    $lineLocal = $m2($mul2($localUnit, (string)$qty));
 
-                                    $lineLocal = $r2($qty * $localUnit);
-                                    $lineUsd   = $r4($lineLocal / $rate);
-                                    $unitUsd   = $qty > 0 ? $r4($lineUsd / $qty) : 0.0;
+                                    // Convert to USD (4 d.p.), NO back conversion here
+                                    $lineUsd = $m4($div4($lineLocal, $rateS));
+                                    $unitUsd = $m4($div4($lineUsd, (string)$qty));
 
-                                    $cost = (float) ($get('cost_price') ?? 0);
-                                    if (!$canSellBelowCost && $cost > 0 && $unitUsd < $cost) {
-                                        $unitUsd  = $r4($cost);
-                                        $lineUsd  = $r4($qty * $unitUsd);
-                                        $lineLocal = $r2($lineUsd * $rate);
-                                        $localUnit = $qty > 0 ? $r2($lineLocal / $qty) : $localUnit;
-
-                                        $msg = $canSeeCost
-                                            ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format($cost, 2)])
-                                            : __('Unit price raised to the minimum allowed.');
-                                        Notification::make()->title($msg)->warning()->send();
+                                    // cost guard (compare in USD)
+                                    $costUsd = $m4((float) ($get('cost_price') ?? 0));
+                                    if (!$canSellBelowCost && bccomp($costUsd, '0', 4) > 0 && bccomp($unitUsd, $costUsd, 4) < 0) {
+                                        $unitUsd  = $costUsd;
+                                        $lineUsd  = $m4($mul4($unitUsd, (string)$qty));
+                                        $lineLocal= $m2($mul2($lineUsd, $rateS));
+                                        $localUnit= $m2($div4($lineLocal, (string)$qty));
+                                        Notification::make()
+                                            ->title($canSeeCost
+                                                ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format((float)$costUsd, 2)])
+                                                : __('Unit price raised to the minimum allowed.')
+                                            )->warning()->send();
                                     }
 
+                                    // Persist authoritative + derived values
                                     $set('unit_price_local', $localUnit);
                                     $set('line_total_local',  $lineLocal);
                                     $set('unit_price',        $unitUsd);
                                     $set('line_total',        $lineUsd);
 
+                                    // recompute totals in USD then FX
+                                    $rate = (float) $rateS;
                                     $extraUsd = $extraFromPercent($get);
                                     $set('../../extra_fees', $extraUsd);
+
                                     $t = $compute(
                                         (array) ($get('../../items') ?? []),
                                         (float) ($get('../../discount') ?? 0),
@@ -942,15 +952,16 @@ class OrderResource extends \Filament\Resources\Resource
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
                         ->numeric()->default(0)->step('0.01')->rule('decimal:0,2')
                         ->live(onBlur: true)
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
-                            $rate = (float)($get('exchange_rate') ?? 1);
-                            if ($rate <= 0) $rate = 1;
-                            $set('discount_local', $r2(((float)($get('discount') ?? 0)) * $rate));
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                            $rate = (string)($get('exchange_rate') ?? '1');
+                            if (((float)$rate) <= 0) $rate = '1';
+                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $extraFromPercent) {
-                            $rate = (float)($get('exchange_rate') ?? 1);
-                            if ($rate <= 0) $rate = 1;
-                            $set('discount', $r2(((float)$state) / $rate));
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $m2, $div4, $extraFromPercent) {
+                            $rate = (string)($get('exchange_rate') ?? '1');
+                            if (((float)$rate) <= 0) $rate = '1';
+                            // store USD side from local change
+                            $set('discount', (float) $div4($state, $rate));
 
                             $items = (array) ($get('items') ?? []);
                             $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
@@ -968,15 +979,16 @@ class OrderResource extends \Filament\Resources\Resource
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
                         ->numeric()->default(0)->step('0.01')->rule('decimal:0,2')
                         ->live(onBlur: true)
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2) {
-                            $rate = (float)($get('exchange_rate') ?? 1);
-                            if ($rate <= 0) $rate = 1;
-                            $set('shipping_local', $r2(((float)($get('shipping') ?? 0)) * $rate));
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                            $rate = (string)($get('exchange_rate') ?? '1');
+                            if (((float)$rate) <= 0) $rate = '1';
+                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $extraFromPercent) {
-                            $rate = (float)($get('exchange_rate') ?? 1);
-                            if ($rate <= 0) $rate = 1;
-                            $set('shipping', $r2(((float)$state) / $rate));
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $div4, $extraFromPercent) {
+                            $rate = (string)($get('exchange_rate') ?? '1');
+                            if (((float)$rate) <= 0) $rate = '1';
+                            // store USD side from local change
+                            $set('shipping', (float) $div4($state, $rate));
 
                             $items = (array) ($get('items') ?? []);
                             $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
