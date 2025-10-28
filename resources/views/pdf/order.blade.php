@@ -175,7 +175,7 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
   <div class="left">
     @if($showCompanyBlock)
       @if($logo)
-        <img class="logo" src="{{ $logo }}">
+         <img class="logo" width="" src="https://dev-srv.tlkeys.com/storage/Logo/techno-lock-desktop-logo.jpg">
       @endif
       <div class="muted">
         {{ $companyAddr1 }} <br>
