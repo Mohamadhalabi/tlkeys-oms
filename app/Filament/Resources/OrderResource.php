@@ -27,12 +27,68 @@ class OrderResource extends \Filament\Resources\Resource
 {
     protected static ?string $model = Order::class;
     protected static ?string $navigationIcon = 'heroicon-o-receipt-percent';
-
     protected static ?string $navigationGroup = 'Sales';
     public static function getNavigationGroup(): ?string { return __('Sales'); }
     public static function getNavigationLabel(): string { return __('Orders'); }
     public static function getPluralModelLabel(): string { return __('Orders'); }
     public static function getModelLabel(): string { return __('Order'); }
+
+    /* =========================
+     * Numeric helpers (ROUND)
+     * ========================= */
+
+    /** Round half-up to 2 dp and return string */
+    private static function r2($v): string {
+        $v = (string)$v;
+        if (bccomp($v, '0', 10) >= 0) {
+            // positive: add 0.005 then truncate
+            return bcadd(bcadd($v, '0.005', 5), '0', 2);
+        }
+        // negative: subtract 0.005 then truncate
+        return bcadd(bcsub($v, '0.005', 5), '0', 2);
+    }
+
+    /** Round half-up to 4 dp and return string */
+    private static function r4($v): string {
+        $v = (string)$v;
+        if (bccomp($v, '0', 10) >= 0) {
+            return bcadd(bcadd($v, '0.00005', 5), '0', 4);
+        }
+        return bcadd(bcsub($v, '0.00005', 5), '0', 4);
+    }
+
+    /** Multiply then round to 2 dp */
+    private static function mul2($a, $b): string {
+        return self::r2(bcmul((string)$a, (string)$b, 6));
+    }
+
+    /** Multiply then round to 4 dp */
+    private static function mul4($a, $b): string {
+        return self::r4(bcmul((string)$a, (string)$b, 10));
+    }
+
+    /** Divide to 4 dp safely (0 guard), then round 4 dp */
+    private static function div4($a, $b): string {
+        $b = (string)$b;
+        if ($b === '0' || $b === '' || (float)$b == 0.0) return '0.0000';
+        return self::r4(bcdiv((string)$a, $b, 10));
+    }
+
+    /** Pretty 2dp string using round-half-up (no truncation) */
+    private static function fmt2(string $v): string {
+        // convert to integer cents with rounding
+        // bc* already rounded via r2; just format
+        $rounded = self::r2($v);
+        // keep minus sign and exactly 2 dp
+        $neg = (strpos($rounded, '-') === 0);
+        if ($neg) $rounded = substr($rounded, 1);
+        if (strpos($rounded, '.') === false) $rounded .= '.00';
+        else {
+            [$i,$d] = explode('.', $rounded, 2);
+            $rounded = $i . '.' . str_pad(substr($d,0,2), 2, '0');
+        }
+        return $neg ? ('-' . $rounded) : $rounded;
+    }
 
     public static function form(Form $form): Form
     {
@@ -42,43 +98,31 @@ class OrderResource extends \Filament\Resources\Resource
         $canSeeCost       = (bool) (($user?->can_see_cost ?? false) || $user?->hasRole('admin'));
         $canSellBelowCost = (bool) (($user?->can_sell_below_cost ?? false) || $user?->hasRole('admin'));
 
-        // ---- Precise helpers (BCMath) ----
+        // Short local callables that use static helpers
+        $r2   = fn($v) => self::r2($v);
+        $r4   = fn($v) => self::r4($v);
+        $mul2 = fn($a,$b) => self::mul2($a,$b);
+        $mul4 = fn($a,$b) => self::mul4($a,$b);
+        $div4 = fn($a,$b) => self::div4($a,$b);
+        $fmt2 = fn($v) => self::fmt2((string)$v);
 
-
-        $fmt2 = function (string $v): string {
-            // format with integer cents to avoid float conversion
-            $cents = (int) bcmul($v, '100', 0);
-            $sign  = $cents < 0 ? '-' : '';
-            $cents = abs($cents);
-            return $sign . intdiv($cents, 100) . '.' . str_pad((string) ($cents % 100), 2, '0', STR_PAD_LEFT);
-        };
-        $m2   = fn ($v) => bcadd((string)$v, '0', 2);               // 2 d.p. string
-        $m4   = fn ($v) => bcadd((string)$v, '0', 4);               // 4 d.p. string
-        $mul2 = fn ($a, $b) => bcadd(bcmul((string)$a, (string)$b, 8), '0', 2);
-        $mul4 = fn ($a, $b) => bcadd(bcmul((string)$a, (string)$b, 12), '0', 4);
-        $div4 = fn ($a, $b) => ($b == 0 || $b === '0') ? '0.0000' : bcadd(bcdiv((string)$a, (string)$b, 12), '0', 4);
-
-        // (kept for lightweight derived displays that aren’t edited by user)
-        $r2 = fn ($v) => bcadd((string) $v, '0', 2);
-        $r4 = fn ($v) => bcadd((string) $v, '0', 4);
-
-        $applyCurrencyOnCreate = function (string $cur, Forms\Get $get, Forms\Set $set, $record) use ($r2, $m2, $mul2) {
+        $applyCurrencyOnCreate = function (string $cur, Forms\Get $get, Forms\Set $set, $record) use ($mul2, $r2) {
             if ($record) return;
             $set('currency', $cur);
             $rate = (string) CurrencyRate::getRate($cur ?: 'USD');
             if (((float)$rate) <= 0) { $rate = '1'; }
 
             $set('exchange_rate', (float)$rate);
-            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
-            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
+            $set('discount_local', $r2($mul2(($get('discount') ?? 0), $rate)));
+            $set('shipping_local', $r2($mul2(($get('shipping') ?? 0), $rate)));
 
             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                 $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
                 $qty     = (string) ($get("items.$i.qty") ?? '0');
-                $usdLine = (string) ($get("items.$i.line_total") ?? $mul4($qty, $usdUnit));
+                $usdLine = (string) ($get("items.$i.line_total") ?? self::mul4($qty, $usdUnit));
 
-                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
-                $set("items.$i.line_total_local", $m2($mul2($usdLine, $rate)));
+                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
+                $set("items.$i.line_total_local", $r2($mul2($usdLine, $rate)));
                 $set("items.$i::__currency_mirror", microtime(true));
             }
         };
@@ -102,23 +146,22 @@ class OrderResource extends \Filament\Resources\Resource
         };
 
         $compute = function (array $items, float $discountUsd, float $shippingUsd, float $extraFeesUsd, float $rate) use ($r2, $r4) : array {
-            // work as strings
             $subtotalUsd = '0.0000';
             foreach ($items as $row) {
                 $qty  = (string) ($row['qty'] ?? '0');
                 $unit = (string) ($row['unit_price'] ?? '0');
-                $line = bcmul($qty, $unit, 4);
-                $subtotalUsd = bcadd($subtotalUsd, $line, 4);
+                $line = bcmul($qty, $unit, 6);
+                $subtotalUsd = bcadd($subtotalUsd, $line, 6);
             }
 
             $discount = $r4((string) $discountUsd);
             $shipping = $r4((string) $shippingUsd);
             $extra    = $r4((string) $extraFeesUsd);
 
-            $totalUsd = bcsub($subtotalUsd, $discount, 4);
-            $totalUsd = bcadd($totalUsd, $shipping, 4);
-            $totalUsd = bcadd($totalUsd, $extra, 4);
-            if (bccomp($totalUsd, '0', 4) < 0) $totalUsd = '0.0000';
+            $totalUsd = bcsub($subtotalUsd, $discount, 6);
+            $totalUsd = bcadd($totalUsd, $shipping, 6);
+            $totalUsd = bcadd($totalUsd, $extra, 6);
+            if (bccomp($totalUsd, '0', 6) < 0) $totalUsd = '0.0000';
 
             $rateS = $r4((string) $rate);
             $subtotalFx = $r4(bcmul($subtotalUsd, $rateS, 8));
@@ -131,7 +174,6 @@ class OrderResource extends \Filament\Resources\Resource
                 'total_fx'     => $r2($totalFx),
             ];
         };
-
 
         $setNestedTotals = function (Forms\Set $set, array $t): void {
             $set('../../subtotal', $t['subtotal_usd']);
@@ -211,43 +253,41 @@ class OrderResource extends \Filament\Resources\Resource
                         })
                         ->default('USD')
                         ->reactive()
-                        // hydrate with precise local values from USD once
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($r2, $m2, $mul2) {
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($mul2, $r2) {
                             $rate = (string) (($record && $record->exchange_rate > 0) ? $record->exchange_rate : CurrencyRate::getRate($state ?: 'USD'));
                             if (((float)$rate) <= 0) $rate = '1';
 
                             $set('exchange_rate', (float)$rate);
-                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
-                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
+                            $set('discount_local', $r2($mul2(($get('discount') ?? 0), $rate)));
+                            $set('shipping_local', $r2($mul2(($get('shipping') ?? 0), $rate)));
 
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
                                 $qty     = (string) ($get("items.$i.qty") ?? '0');
-                                $usdLine = (string) ($get("items.$i.line_total") ?? (string)$r2(((float)$qty) * ((float)$usdUnit)));
+                                $usdLine = (string) ($get("items.$i.line_total") ?? self::mul4($qty, $usdUnit));
 
-                                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
-                                $set("items.$i.line_total_local", $m2($mul2($usdLine, $rate)));
+                                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
+                                $set("items.$i.line_total_local", $r2($mul2($usdLine, $rate)));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
-                        // when currency really changes, recompute *local* from USD (one-way)
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($m2, $mul2) {
-                            if ($record) return; // don't change existing orders' money
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set, $record) use ($mul2, $r2) {
+                            if ($record) return;
 
                             $rate = (string) CurrencyRate::getRate($state ?: 'USD');
                             if (((float)$rate) <= 0) $rate = '1';
 
                             $set('exchange_rate', (float)$rate);
-                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
-                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
+                            $set('discount_local', $r2($mul2(($get('discount') ?? 0), $rate)));
+                            $set('shipping_local', $r2($mul2(($get('shipping') ?? 0), $rate)));
 
                             foreach (array_keys((array)($get('items') ?? [])) as $i) {
                                 $usdUnit = (string) ($get("items.$i.unit_price") ?? '0');
                                 $qty     = (string) ($get("items.$i.qty") ?? '0');
                                 $usdLine = (string) ($get("items.$i.line_total") ?? '0');
 
-                                $set("items.$i.unit_price_local", $m2($mul2($usdUnit, $rate)));
-                                $set("items.$i.line_total_local", $m2($mul2($usdLine !== '0' ? $usdLine : $mul2($usdUnit, $qty), $rate)));
+                                $set("items.$i.unit_price_local", $r2($mul2($usdUnit, $rate)));
+                                $set("items.$i.line_total_local", $r2($mul2($usdLine !== '0' ? $usdLine : self::mul4($usdUnit, $qty), $rate)));
                                 $set("items.$i.__currency_mirror", microtime(true));
                             }
                         })
@@ -303,7 +343,7 @@ class OrderResource extends \Filament\Resources\Resource
                         ->disabled(fn (Forms\Get $get, $record) => $record && $record->type === 'order')
                         ->columnSpan(['sm' => 2, 'md' => 1, 'lg' => 1]),
 
-                    /* ------------------ FIXED CUSTOMER SEARCH ------------------ */
+                    /* ------------------ CUSTOMER SEARCH ------------------ */
                     Forms\Components\Select::make('customer_id')
                         ->label(__('Customer'))
                         ->searchable()
@@ -383,7 +423,7 @@ class OrderResource extends \Filament\Resources\Resource
                             return \App\Models\Customer::create($data)->id;
                         })
                         ->columnSpan(['sm' => 2, 'md' => 2, 'lg' => 1]),
-                    /* ---------------- END FIXED CUSTOMER SEARCH ---------------- */
+                    /* ---------------- END CUSTOMER SEARCH ---------------- */
 
                     Forms\Components\Select::make('payment_status')
                         ->label(__('Payment status'))
@@ -796,41 +836,39 @@ class OrderResource extends \Filament\Resources\Resource
                                     $setNestedTotals($set, $t);
                                 }),
 
-                            // ***** KEY CHANGE: precise one-way local -> USD conversion with BCMath *****
+                            // Local (currency) price input — authoritative
                             Forms\Components\TextInput::make('unit_price_local')
                                 ->label(fn (Forms\Get $get) => __('Unit price (:cur)', ['cur' => $get('../../currency') ?: 'USD']))
                                 ->suffix(fn (Forms\Get $get) => $get('../../currency') ?: 'USD')
                                 ->numeric()->step('0.01')->inputMode('decimal')
                                 ->rule('decimal:0,2')
                                 ->live(onBlur: true)
-                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                                ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $mul2) {
                                     $rate = (string)($get('../../exchange_rate') ?? '1');
                                     if (((float)$rate) <= 0) $rate = '1';
                                     $usd  = (string)($get('unit_price') ?? '0');
                                     $qty  = (string)($get('qty') ?? '1');
-                                    $set('unit_price_local', $m2($mul2($usd, $rate)));
-                                    $set('line_total_local', $m2($mul2((string)($get('line_total') ?? $mul2($usd,$qty)), $rate)));
+                                    $set('unit_price_local', $r2($mul2($usd, $rate)));
+                                    $set('line_total_local', $r2(self::mul2(($get('line_total') ?? self::mul4($usd,$qty)), $rate)));
                                 })
-                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $m2, $m4, $mul2, $mul4, $div4, $extraFromPercent) {
-                                    // authoritative local from user
+                                ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($compute, $setNestedTotals, $canSellBelowCost, $canSeeCost, $r2, $r4, $mul2, $mul4, $div4, $extraFromPercent) {
                                     $qty   = (int) max(1, (float) ($get('qty') ?? 1));
                                     $rateS = (string) ($get('../../exchange_rate') ?? '1');
                                     if (((float)$rateS) <= 0) $rateS = '1';
 
-                                    $localUnit = $m2($state);
-                                    $lineLocal = $m2($mul2($localUnit, (string)$qty));
+                                    $localUnit = $r2($state);
+                                    $lineLocal = $r2($mul2($localUnit, (string)$qty));
 
-                                    // Convert to USD (4 d.p.), NO back conversion here
-                                    $unitUsd = $m4($div4($localUnit, $rateS));          // USD per unit
-                                    $lineUsd = $m4($mul4($unitUsd, (string)$qty));      // USD line total
+                                    // Convert to USD with proper rounding
+                                    $unitUsd = $r4($div4($localUnit, $rateS));          // USD per unit
+                                    $lineUsd = $r4($mul4($unitUsd, (string)$qty));      // USD line total
 
-                                    // cost guard (compare in USD)
-                                    $costUsd = $m4((float) ($get('cost_price') ?? 0));
+                                    $costUsd = $r4((float) ($get('cost_price') ?? 0));
                                     if (!$canSellBelowCost && bccomp($costUsd, '0', 4) > 0 && bccomp($unitUsd, $costUsd, 4) < 0) {
-                                        $unitUsd  = $costUsd;
-                                        $lineUsd  = $m4($mul4($unitUsd, (string)$qty));
-                                        $lineLocal= $m2($mul2($lineUsd, $rateS));
-                                        $localUnit= $m2($div4($lineLocal, (string)$qty));
+                                        $unitUsd   = $costUsd;
+                                        $lineUsd   = $r4($mul4($unitUsd, (string)$qty));
+                                        $lineLocal = $r2($mul2($lineUsd, $rateS));
+                                        $localUnit = $r2($div4($lineLocal, (string)$qty));
                                         Notification::make()
                                             ->title($canSeeCost
                                                 ? __('Unit price raised to cost (:cost USD).', ['cost' => number_format((float)$costUsd, 2)])
@@ -838,13 +876,11 @@ class OrderResource extends \Filament\Resources\Resource
                                             )->warning()->send();
                                     }
 
-                                    // Persist authoritative + derived values
                                     $set('unit_price_local', $localUnit);
                                     $set('line_total_local',  $lineLocal);
                                     $set('unit_price',        $unitUsd);
                                     $set('line_total',        $lineUsd);
 
-                                    // recompute totals in USD then FX
                                     $rate = (float) $rateS;
                                     $extraUsd = $extraFromPercent($get);
                                     $set('../../extra_fees', $extraUsd);
@@ -978,15 +1014,14 @@ class OrderResource extends \Filament\Resources\Resource
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
                         ->numeric()->default(0)->step('0.01')->rule('decimal:0,2')
                         ->live(onBlur: true)
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $mul2) {
                             $rate = (string)($get('exchange_rate') ?? '1');
                             if (((float)$rate) <= 0) $rate = '1';
-                            $set('discount_local', $m2($mul2(($get('discount') ?? 0), $rate)));
+                            $set('discount_local', $r2($mul2(($get('discount') ?? 0), $rate)));
                         })
-                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $m2, $div4, $extraFromPercent) {
+                        ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $div4, $extraFromPercent) {
                             $rate = (string)($get('exchange_rate') ?? '1');
                             if (((float)$rate) <= 0) $rate = '1';
-                            // store USD side from local change
                             $set('discount', (float) $div4($state, $rate));
 
                             $items = (array) ($get('items') ?? []);
@@ -1005,15 +1040,14 @@ class OrderResource extends \Filament\Resources\Resource
                         ->suffix(fn (Forms\Get $get) => $get('currency') ?: 'USD')
                         ->numeric()->default(0)->step('0.01')->rule('decimal:0,2')
                         ->live(onBlur: true)
-                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($m2, $mul2) {
+                        ->afterStateHydrated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $mul2) {
                             $rate = (string)($get('exchange_rate') ?? '1');
                             if (((float)$rate) <= 0) $rate = '1';
-                            $set('shipping_local', $m2($mul2(($get('shipping') ?? 0), $rate)));
+                            $set('shipping_local', $r2($mul2(($get('shipping') ?? 0), $rate)));
                         })
                         ->afterStateUpdated(function ($state, Forms\Get $get, Forms\Set $set) use ($r2, $div4, $extraFromPercent) {
                             $rate = (string)($get('exchange_rate') ?? '1');
                             if (((float)$rate) <= 0) $rate = '1';
-                            // store USD side from local change
                             $set('shipping', (float) $div4($state, $rate));
 
                             $items = (array) ($get('items') ?? []);
@@ -1043,7 +1077,7 @@ class OrderResource extends \Filament\Resources\Resource
                             $extraUsd = (float) ($get('extra_fees') ?? ($record->extra_fees ?? 0));
 
                             $items = (array) ($get('items') ?? []);
-                            $subtotalUsd = $r2(collect($items)->sum(fn ($r) => (float)($r['qty'] ?? 0) * (float)($r['unit_price'] ?? 0)));
+                            $subtotalUsd = $r2(collect($items)->sum(fn ($i) => (float)($i['qty'] ?? 0) * (float)($i['unit_price'] ?? 0)));
                             if ($subtotalUsd <= 0 && $record?->relationLoaded('items')) {
                                 $subtotalUsd = $r2((float) $record->items->sum(fn ($i) => (float)$i->qty * (float)$i->unit_price));
                             }
@@ -1080,8 +1114,8 @@ class OrderResource extends \Filament\Resources\Resource
 
                     Forms\Components\Placeholder::make('subtotal_display')
                         ->label(fn (Forms\Get $get) => __('Subtotal (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) use ($r2, $fmt2) {
-                            $rate  = $r2($get('exchange_rate') ?? '1');
+                        ->content(function (Forms\Get $get) {
+                            $rate  = self::r2($get('exchange_rate') ?? '1');
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::query()->select('id')->with(['items:id,order_id,qty,unit_price'])->find($id);
@@ -1089,17 +1123,17 @@ class OrderResource extends \Filament\Resources\Resource
                             }
                             $subtotalUsd = '0.0000';
                             foreach ($items as $r) {
-                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 4), 4);
+                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 6), 6);
                             }
-                            $fx = bcmul($subtotalUsd, $rate, 4);
-                            return new HtmlString('<span class="text-red-600 font-semibold">'.$fmt2($fx).'</span>');
+                            $fx = bcmul($subtotalUsd, $rate, 6);
+                            return new HtmlString('<span class="text-red-600 font-semibold">'.self::fmt2($fx).'</span>');
                         })
                         ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
 
                     Forms\Components\Placeholder::make('total_display')
                         ->label(fn (Forms\Get $get) => __('Total (:cur)', ['cur' => $get('currency') ?: 'USD']))
-                        ->content(function (Forms\Get $get) use ($r2, $fmt2) {
-                            $rate  = $r2($get('exchange_rate') ?? '1');
+                        ->content(function (Forms\Get $get) {
+                            $rate  = self::r2($get('exchange_rate') ?? '1');
                             $items = (array) ($get('items') ?? []);
                             if (empty($items) && $id = $get('id')) {
                                 $order = Order::query()->select('id','discount','shipping','extra_fees','exchange_rate','currency')->with(['items:id,order_id,qty,unit_price'])->find($id);
@@ -1107,18 +1141,18 @@ class OrderResource extends \Filament\Resources\Resource
                             }
                             $subtotalUsd = '0.0000';
                             foreach ($items as $r) {
-                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 4), 4);
+                                $subtotalUsd = bcadd($subtotalUsd, bcmul((string)($r['qty']??'0'), (string)($r['unit_price']??'0'), 6), 6);
                             }
-                            $discountUsd = $r2($get('discount') ?? '0');
-                            $shippingUsd = $r2($get('shipping') ?? '0');
-                            $extraUsd    = $r2($get('extra_fees') ?? '0');
+                            $discountUsd = self::r2($get('discount') ?? '0');
+                            $shippingUsd = self::r2($get('shipping') ?? '0');
+                            $extraUsd    = self::r2($get('extra_fees') ?? '0');
 
-                            $totalUsd = bcadd(bcsub($subtotalUsd, $discountUsd, 4), $shippingUsd, 4);
-                            $totalUsd = bcadd($totalUsd, $extraUsd, 4);
-                            if (bccomp($totalUsd,'0',4) < 0) $totalUsd = '0.0000';
+                            $totalUsd = bcadd(bcsub($subtotalUsd, $discountUsd, 6), $shippingUsd, 6);
+                            $totalUsd = bcadd($totalUsd, $extraUsd, 6);
+                            if (bccomp($totalUsd,'0',6) < 0) $totalUsd = '0.0000';
 
-                            $fx = bcmul($totalUsd, $rate, 4);
-                            return new HtmlString('<span class="text-red-600 font-semibold">'.$fmt2($fx).'</span>');
+                            $fx = bcmul($totalUsd, $rate, 6);
+                            return new HtmlString('<span class="text-red-600 font-semibold">'.self::fmt2($fx).'</span>');
                         })
                         ->columnSpan(['default' => 1, 'sm' => 2, 'md' => 3, 'lg' => 6]),
                 ])
@@ -1160,28 +1194,28 @@ class OrderResource extends \Filament\Resources\Resource
 
                 Tables\Columns\TextColumn::make('shipping_fx')
                     ->label(__('Shipping'))
-                    ->state(fn (Order $r) => $fmt2(bcmul((string)$r->shipping, (string)$r->exchange_rate, 4)))
+                    ->state(fn (Order $r) => self::fmt2(bcmul((string)$r->shipping, (string)$r->exchange_rate, 6)))
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
 
                 Tables\Columns\TextColumn::make('extra_fees_fx')
                     ->label(__('Extra fees'))
-                    ->state(fn (Order $r) => $fmt2(bcmul((string)$r->extra_fees, (string)$r->exchange_rate, 4)))
+                    ->state(fn (Order $r) => self::fmt2(bcmul((string)$r->extra_fees, (string)$r->exchange_rate, 6)))
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
 
                 Tables\Columns\TextColumn::make('total_fx')
                     ->label(__('Total (Currency)'))
-                    ->state(function (Order $r) use ($fmt2) {
+                    ->state(function (Order $r) {
                         $subtotalUsd = '0.0000';
                         foreach ($r->items as $i) {
-                            $subtotalUsd = bcadd($subtotalUsd, bcmul((string)$i->qty, (string)$i->unit_price, 4), 4);
+                            $subtotalUsd = bcadd($subtotalUsd, bcmul((string)$i->qty, (string)$i->unit_price, 6), 6);
                         }
-                        $totalUsd = bcadd(bcsub($subtotalUsd, (string)$r->discount, 4), (string)$r->shipping, 4);
-                        $totalUsd = bcadd($totalUsd, (string)$r->extra_fees, 4);
-                        if (bccomp($totalUsd,'0',4) < 0) $totalUsd = '0.0000';
-                        $fx = bcmul($totalUsd, (string)$r->exchange_rate, 4);
-                        return $fmt2($fx);
+                        $totalUsd = bcadd(bcsub($subtotalUsd, (string)$r->discount, 6), (string)$r->shipping, 6);
+                        $totalUsd = bcadd($totalUsd, (string)$r->extra_fees, 6);
+                        if (bccomp($totalUsd,'0',6) < 0) $totalUsd = '0.0000';
+                        $fx = bcmul($totalUsd, (string)$r->exchange_rate, 6);
+                        return self::fmt2($fx);
                     })
                     ->suffix(fn (Order $r) => ' ' . ($r->currency ?? 'USD'))
                     ->wrap(),
