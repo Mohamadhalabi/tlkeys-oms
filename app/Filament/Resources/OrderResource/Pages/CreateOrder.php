@@ -3,9 +3,13 @@
 namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
-use Filament\Resources\Pages\CreateRecord;
+use App\Models\Customer;
+use App\Models\Order;
 use Filament\Notifications\Notification;
 use Filament\Notifications\Actions\Action as NotificationAction;
+use Filament\Resources\Pages\CreateRecord;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
 class CreateOrder extends CreateRecord
@@ -14,104 +18,129 @@ class CreateOrder extends CreateRecord
 
     protected function mutateFormDataBeforeCreate(array $data): array
     {
-        $user = auth()->user();
-        if ($user?->hasRole('seller')) {
-            $data['seller_id'] = $user->id;
-            $data['branch_id'] = $data['branch_id'] ?? $user->branch_id;
+        $user = Auth::user();
+        $data['seller_id'] = $user?->hasRole('Seller') ? $user->id : ($user?->hasRole('Admin') ? null : $user?->id);
+
+        if (($data['type'] ?? 'proforma') !== 'order') {
+            $data['status']          = $data['status'] ?? 'draft';
+            $data['payment_status']  = $data['payment_status'] ?? 'unpaid';
+            $data['paid_amount']     = $data['paid_amount'] ?? 0;
         }
 
-        // Snapshot exchange rate ONCE at creation (based on chosen currency)
-        $code = $data['currency'] ?? 'USD';
-        $rate = \App\Models\CurrencyRate::getRate($code);
-        if ($rate <= 0) $rate = 1;
-        $data['exchange_rate'] = $rate;
+        return $this->normalizeOrderNumbers($data);
+    }
 
-        // Totals in USD are canonical (percent already converted to USD into extra_fees by the form)
-        $subtotalUsd = collect($data['items'] ?? [])
-            ->sum(fn ($i) => (float)($i['qty'] ?? 0) * (float)($i['unit_price'] ?? 0));
-        $discountUsd = (float)($data['discount'] ?? 0);
-        $shippingUsd = (float)($data['shipping'] ?? 0);
-        $extraFeesUsd= (float)($data['extra_fees'] ?? 0);
+    protected function handleRecordCreation(array $data): Model
+    {
+        /** @var \App\Models\Order $order */
+        $order = static::getModel()::create($data);
 
-        $data['subtotal']   = round($subtotalUsd, 2);
-        $data['discount']   = round($discountUsd, 2);
-        $data['shipping']   = round($shippingUsd, 2);
-        $data['extra_fees'] = round($extraFeesUsd, 2);
-        $data['total']      = round(max(0, $subtotalUsd - $discountUsd + $shippingUsd + $extraFeesUsd), 2);
+        // Apply wallet side-effects (same rules as Edit)
+        $this->applyWalletSideEffects($order);
 
-        if (($data['type'] ?? 'proforma') === 'proforma') {
-            $data['customer_id'] = $data['customer_id'] ?? null;
-            unset($data['payment_status'], $data['paid_amount']);
-        } else {
-            $total  = (float)($data['total'] ?? 0);
-            $status = $data['payment_status'] ?? 'unpaid';
-            $paid   = (float)($data['paid_amount'] ?? 0);
+        return $order;
+    }
 
-            $data['paid_amount'] = match ($status) {
-                'paid'            => $total,
-                'unpaid', 'debt'  => 0.0,
-                'partially_paid'  => min(max($paid, 0.0), $total),
-                default           => 0.0,
-            };
+    private function normalizeOrderNumbers(array $data): array
+    {
+        foreach ([
+            'subtotal' => 0,
+            'discount' => 0,
+            'shipping' => 0,
+            'extra_fees_percent' => 0,
+            'total' => 0,
+            'exchange_rate' => 1,
+            'paid_amount' => 0,
+        ] as $key => $fallback) {
+            $val = $data[$key] ?? $fallback;
+            if ($val === '' || $val === null) $val = $fallback;
+            $data[$key] = is_numeric($val) ? (float) $val : $fallback;
+        }
+
+        // Guard rails for payment combos
+        if (($data['type'] ?? 'proforma') === 'order') {
+            $data['paid_amount'] = max(0, min((float)$data['paid_amount'], (float)$data['total']));
+            if ($data['payment_status'] === 'paid') {
+                $data['paid_amount'] = (float)$data['total'];
+            } elseif ($data['payment_status'] === 'unpaid') {
+                $data['paid_amount'] = 0.0;
+            } else { // partial
+                if ($data['paid_amount'] <= 0 || $data['paid_amount'] >= (float)$data['total']) {
+                    $data['payment_status'] = ($data['paid_amount'] >= (float)$data['total']) ? 'paid' : 'unpaid';
+                }
+            }
         }
 
         return $data;
     }
 
+    private function applyWalletSideEffects(Order $order): void
+    {
+        // No wallet moves for proforma or missing customer
+        if ($order->type !== 'order' || !$order->customer_id) {
+            return;
+        }
+
+        $tx = DB::table('wallet_transactions')->where('order_id', $order->id)->first();
+
+        $shouldCharge = in_array($order->payment_status, ['partial', 'paid'], true);
+        $amountToCharge = ($order->payment_status === 'paid')
+            ? (float) $order->total
+            : (float) $order->paid_amount;
+
+        if ($shouldCharge && $amountToCharge > 0) {
+            if ($tx) {
+                $delta = $amountToCharge - (float) $tx->amount;
+                if ($delta !== 0.0) {
+                    DB::table('customers')->where('id', $order->customer_id)->decrement('wallet_balance', $delta);
+                }
+                DB::table('wallet_transactions')->where('id', $tx->id)->update([
+                    'customer_id' => $order->customer_id,
+                    'type'        => 'debit',
+                    'amount'      => $amountToCharge,
+                    'note'        => 'Order ' . ($order->code ?? $order->id) . ' payment',
+                    'updated_at'  => now(),
+                ]);
+            } else {
+                DB::table('wallet_transactions')->insert([
+                    'customer_id' => $order->customer_id,
+                    'order_id'    => $order->id,
+                    'type'        => 'debit',
+                    'amount'      => $amountToCharge,
+                    'note'        => 'Order ' . ($order->code ?? $order->id) . ' payment',
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
+                ]);
+                DB::table('customers')->where('id', $order->customer_id)->decrement('wallet_balance', $amountToCharge);
+            }
+        } else {
+            // unpaid: ensure any prior tx is reversed
+            if ($tx) {
+                DB::table('customers')->where('id', $order->customer_id)->increment('wallet_balance', (float) $tx->amount);
+                DB::table('wallet_transactions')->where('id', $tx->id)->delete();
+            }
+        }
+    }
+
     protected function afterCreate(): void
     {
-        DB::transaction(function () {
-            $order    = $this->record->loadMissing('items');
-            $branchId = (int) $order->branch_id;
-
-            // Only deduct stock for 'order' type
-            if ($order->type === 'order') {
-                foreach ($order->items as $item) {
-                    $pid = (int) $item->product_id;
-                    $qty = (int) $item->qty;
-                    if ($pid > 0 && $qty > 0) {
-                        self::adjustBranchStock($pid, $branchId, -$qty); // deduct
-                    }
-                }
-            }
-
-            $order->syncWallet();
-        });
-
-        // ---- Persistent pop-up with actions ----
-        $pdfUrl = route('admin.orders.pdf', $this->record) . '?lang=' . app()->getLocale();
+        /** @var Order $order */
+        $order = $this->record;
 
         Notification::make()
-            ->title(__('Order created'))
-            ->body(__('What would you like to do next?'))
+            ->title(__('orders.pdf_ready'))
             ->success()
-            ->persistent() // don’t auto-dismiss
             ->actions([
-                NotificationAction::make('download_pdf')
-                    ->label(__('Download PDF'))
-                    ->url($pdfUrl, shouldOpenInNewTab: true)
-                    ->button(),
-                NotificationAction::make('close_popup')
-                    ->label(__('Close'))
-                    ->button()
-                    ->close(),
+                NotificationAction::make('pdf')
+                    ->label(__('orders.download_pdf'))
+                    ->url(route('admin.orders.pdf', $order))
+                    ->openUrlInNewTab(),
             ])
             ->send();
     }
 
-    /** same robust helper as in EditOrder */
-    public static function adjustBranchStock(int $productId, int $branchId, int $delta): void
+    protected function getRedirectUrl(): string
     {
-        if ($branchId <= 0 || $productId <= 0 || $delta === 0) return;
-
-        $initial = $delta;
-
-        DB::statement(
-            'INSERT INTO product_branch (product_id, branch_id, stock)
-            VALUES (?, ?, GREATEST(0, ?))
-            ON DUPLICATE KEY UPDATE
-                stock = GREATEST(0, COALESCE(stock,0) + ?)',
-            [$productId, $branchId, $initial, $delta]
-        );
+        return $this->getResource()::getUrl('edit', ['record' => $this->record]);
     }
 }

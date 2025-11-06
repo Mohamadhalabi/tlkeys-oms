@@ -50,10 +50,9 @@ class Order extends Model
 
     public function items()
     {
-        return $this->hasMany(\App\Models\OrderItem::class)
-            ->orderBy('sort')
-            ->orderBy('id'); // secondary tie-breaker
+        return $this->hasMany(\App\Models\OrderItem::class)->orderBy('sort');
     }
+
     public function branch()   { return $this->belongsTo(Branch::class); }
     public function customer() { return $this->belongsTo(Customer::class); }
     public function seller()   { return $this->belongsTo(User::class,'seller_id'); }
@@ -119,4 +118,5 @@ class Order extends Model
             ])->delete();
         }
     }
+    
 }

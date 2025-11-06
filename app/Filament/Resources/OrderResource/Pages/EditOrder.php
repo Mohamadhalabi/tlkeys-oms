@@ -3,180 +3,207 @@
 namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
-use App\Models\ProductBranch;
+use App\Models\Order;
+use Filament\Actions;
 use Filament\Resources\Pages\EditRecord;
 use Filament\Notifications\Notification;
 use Filament\Notifications\Actions\Action as NotificationAction;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
 class EditOrder extends EditRecord
 {
     protected static string $resource = OrderResource::class;
 
-    /** Toggle this off once verified */
-    protected bool $debug = true;
-
-    /** Normalize state from DB for compare/persist */
-    protected function buildState(): array
+    protected function handleRecordUpdate(Model $record, array $data): Model
     {
-        $this->record->refresh();
-        $this->record->loadMissing('items');
+        unset($data['items']);
 
-        $items = $this->record->items
-            ->mapToGroups(fn ($i) => [(int) $i->product_id => (int) $i->qty])
-            ->map(fn ($g) => (int) $g->sum())
-            ->all();
-        ksort($items);
+        $data = $this->normalizeOrderNumbers($data);
 
-        $type = strtolower((string) ($this->record->type ?? 'order'));
+        $record->update($data);
 
-        return [
-            'branch_id' => (int) $this->record->branch_id,
-            'type'      => $type,
-            'items'     => $items,
-        ];
+        $this->applyWalletSideEffects($record->refresh());
+        return $record;
     }
 
-    /** First run: capture PRE-SAVE snapshot so old != new */
-    protected function mutateFormDataBeforeSave(array $data): array
+    private function normalizeOrderNumbers(array $data): array
     {
-        if (empty($this->record->stock_state)) {
-            $preItems = $this->record->items()
-                ->get(['product_id', 'qty'])
-                ->mapToGroups(fn ($i) => [(int) $i->product_id => (int) $i->qty])
-                ->map(fn ($g) => (int) $g->sum())
-                ->all();
-            ksort($preItems);
-
-            $this->data['__pre_state__'] = [
-                'branch_id' => (int) $this->record->branch_id,
-                'type'      => strtolower((string) ($this->record->type ?? 'order')),
-                'items'     => $preItems,
-            ];
+        foreach ([
+            'subtotal' => 0,
+            'discount' => 0,
+            'shipping' => 0,
+            'extra_fees_percent' => 0,
+            'total' => 0,
+            'exchange_rate' => 1,
+            'paid_amount' => 0,
+        ] as $key => $fallback) {
+            $val = $data[$key] ?? $fallback;
+            if ($val === '' || $val === null) $val = $fallback;
+            $data[$key] = is_numeric($val) ? (float) $val : $fallback;
         }
 
-        // VERY IMPORTANT: Do NOT touch currency or exchange_rate here.
+        if (($data['type'] ?? 'proforma') === 'order') {
+            $data['paid_amount'] = max(0, min((float)$data['paid_amount'], (float)$data['total']));
+            if ($data['payment_status'] === 'paid') {
+                $data['paid_amount'] = (float) $data['total'];
+            } elseif ($data['payment_status'] === 'unpaid') {
+                $data['paid_amount'] = 0.0;
+            } else { // partial
+                if ($data['paid_amount'] <= 0 || $data['paid_amount'] >= (float)$data['total']) {
+                    $data['payment_status'] = ($data['paid_amount'] >= (float)$data['total']) ? 'paid' : 'unpaid';
+                }
+            }
+        }
 
         return $data;
     }
 
-    protected function afterSave(): void
+    protected function mutateFormDataBeforeFill(array $data): array
     {
-        // NEW (true DB state after Filament saved relations)
-        $new = $this->buildState();
+        /** @var \App\Models\Order $order */
+        $order = $this->getRecord();
+        $order->loadMissing(['items.product:id,sku,image,price,sale_price']);
 
-        // OLD = last reconciled, else pre-save snapshot (first run), else new
-        $old = $this->record->stock_state ?? ($this->data['__pre_state__'] ?? $new);
+        $rows = [];
+        $i    = 1;
+        $rate = (float) ($order->exchange_rate ?: 1);
 
-        if ($old === $new) {
-            if (empty($this->record->stock_state)) {
-                $this->record->forceFill(['stock_state' => $new])->saveQuietly();
+        foreach ($order->items as $item) {
+            $p = $item->product;
+            $baseUsd = $rate > 0
+                ? round(((float) $item->unit_price) / $rate, 6)
+                : (float) ($p?->sale_price ?? $p?->price ?? 0);
+
+            $rows[] = [
+                'row_index'      => $i++,
+                'product_id'     => $item->product_id,
+                'qty'            => (float) $item->qty,
+                'unit_price'     => (float) $item->unit_price,
+                'line_total'     => (float) $item->line_total,
+                'sku'            => $p?->sku,
+                'thumb'          => \App\Filament\Resources\OrderResource::productThumbUrl($p?->image),
+                'base_unit_usd'  => $baseUsd,
+                'stock_info'     => null,
+            ];
+        }
+
+        $data['items'] = $rows;
+        return $data;
+    }
+
+    private function applyWalletSideEffects(Order $order): void
+    {
+        // If NOT a real order or no customer: remove any previous tx.
+        if ($order->type !== 'order' || !$order->customer_id) {
+            $tx = DB::table('wallet_transactions')->where('order_id', $order->id)->first();
+            if ($tx) {
+                DB::table('customers')->where('id', $order->customer_id)->increment('wallet_balance', (float) $tx->amount);
+                DB::table('wallet_transactions')->where('id', $tx->id)->delete();
             }
-            if ($this->debug) {
-                Notification::make()->title('Stock: no change')->body('State unchanged.')->success()->send();
-            }
-
-            // Still show the action popup for convenience
-            $this->showSavedActions();
             return;
         }
 
-        $oldBranch = (int) $old['branch_id'];
-        $newBranch = (int) $new['branch_id'];
-        $oldType   = (string) $old['type'];
-        $newType   = (string) $new['type'];
-        $oldItems  = (array)  $old['items'];
-        $newItems  = (array)  $new['items'];
+        $tx = DB::table('wallet_transactions')->where('order_id', $order->id)->first();
 
-        $moves = []; // [branch_id, product_id, delta]; delta>0 restock, delta<0 deduct
+        $shouldCharge = in_array($order->payment_status, ['partial', 'paid'], true);
+        $amountToCharge = ($order->payment_status === 'paid')
+            ? (float) $order->total
+            : (float) $order->paid_amount;
 
-        if ($oldType === 'order' && $newType === 'order') {
-            if ($oldBranch === $newBranch) {
-                $pids = array_unique(array_merge(array_keys($oldItems), array_keys($newItems)));
-                foreach ($pids as $pid) {
-                    $delta = (int)($oldItems[$pid] ?? 0) - (int)($newItems[$pid] ?? 0);
-                    if ($delta !== 0) {
-                        $moves[] = [$newBranch, (int)$pid, $delta];
-                    }
+        if ($shouldCharge && $amountToCharge > 0) {
+            if ($tx) {
+                $delta = $amountToCharge - (float) $tx->amount;
+                if ($delta !== 0.0) {
+                    DB::table('customers')->where('id', $order->customer_id)->decrement('wallet_balance', $delta);
                 }
+                DB::table('wallet_transactions')->where('id', $tx->id)->update([
+                    'customer_id' => $order->customer_id,
+                    'type'        => 'debit',
+                    'amount'      => $amountToCharge,
+                    'note'        => 'Order ' . ($order->code ?? $order->id) . ' payment',
+                    'updated_at'  => now(),
+                ]);
             } else {
-                foreach ($oldItems as $pid => $q) if ($q > 0) $moves[] = [$oldBranch, (int)$pid, +$q];
-                foreach ($newItems as $pid => $q) if ($q > 0) $moves[] = [$newBranch, (int)$pid, -$q];
+                DB::table('wallet_transactions')->insert([
+                    'customer_id' => $order->customer_id,
+                    'order_id'    => $order->id,
+                    'type'        => 'debit',
+                    'amount'      => $amountToCharge,
+                    'note'        => 'Order ' . ($order->code ?? $order->id) . ' payment',
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
+                ]);
+                DB::table('customers')->where('id', $order->customer_id)->decrement('wallet_balance', $amountToCharge);
             }
-        } elseif ($oldType === 'proforma' && $newType === 'order') {
-            foreach ($newItems as $pid => $q) if ($q > 0) $moves[] = [$newBranch, (int)$pid, -$q];
-        } elseif ($oldType === 'order' && $newType === 'proforma') {
-            foreach ($oldItems as $pid => $q) if ($q > 0) $moves[] = [$oldBranch, (int)$pid, +$q];
-        }
-
-        if ($this->debug) {
-            $lines = [];
-            foreach ($moves as [$b, $p, $d]) {
-                $lines[] = "branch:$b product:$p delta:$d";
+        } else {
+            if ($tx) {
+                DB::table('customers')->where('id', $order->customer_id)->increment('wallet_balance', (float) $tx->amount);
+                DB::table('wallet_transactions')->where('id', $tx->id)->delete();
             }
         }
-
-        if ($moves) {
-            DB::transaction(function () use ($moves) {
-                foreach ($moves as [$branchId, $productId, $delta]) {
-                    $row = ProductBranch::query()
-                        ->where('branch_id', $branchId)
-                        ->where('product_id', $productId)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if (!$row) {
-                        $row = new ProductBranch();
-                        $row->branch_id  = $branchId;
-                        $row->product_id = $productId;
-                        $row->stock      = 0;
-                    }
-
-                    $current = (int) $row->stock;
-
-                    // If stock is 0, ignore both increase/decrease moves
-                    if ($current === 0) {
-                        continue;
-                    }
-
-                    $row->stock = max(0, $current + (int) $delta);
-                    $row->save();
-                }
-            });
-
-            Notification::make()
-                ->title('Stock updated')
-                ->body('Branch/product stock levels were reconciled successfully.')
-                ->success()
-                ->send();
-        }
-
-        // Persist NEW as last reconciled for idempotency
-        $this->record->forceFill(['stock_state' => $new])->saveQuietly();
-
-        // Show post-save actions popup
-        $this->showSavedActions();
     }
 
-    protected function showSavedActions(): void
+    protected function afterSave(): void
     {
-        $pdfUrl = route('admin.orders.pdf', $this->record) . '?lang=' . app()->getLocale();
+        $this->fillForm();
+
+        $order = $this->record;
 
         Notification::make()
             ->title(__('Order saved'))
-            ->body(__('What would you like to do next?'))
             ->success()
-            ->persistent()
             ->actions([
-                NotificationAction::make('download_pdf')
+                NotificationAction::make('download')
                     ->label(__('Download PDF'))
-                    ->url($pdfUrl, shouldOpenInNewTab: true)
-                    ->button(),
-                NotificationAction::make('close_popup')
-                    ->label(__('Close'))
-                    ->button()
-                    ->close(),
+                    ->url(route('admin.orders.pdf', $order))
+                    ->openUrlInNewTab(),
             ])
             ->send();
+    }
+
+    protected function getHeaderActions(): array
+    {
+        return [
+            // Convert Proforma -> Order
+            Actions\Action::make('convert_to_order')
+                ->label(__('Convert to Order'))
+                ->icon('heroicon-o-arrows-right-left')
+                ->visible(fn () => $this->record?->type === 'proforma')
+                ->requiresConfirmation()
+                ->action(function () {
+                    /** @var Order $o */
+                    $o = $this->record->refresh();
+                    $o->update([
+                        'type'            => 'order',
+                        'status'          => 'pending',
+                        'payment_status'  => 'unpaid',
+                        'paid_amount'     => 0.0,
+                    ]);
+                    // unpaid => no wallet move, but ensure any previous tx is cleared
+                    $tx = DB::table('wallet_transactions')->where('order_id', $o->id)->first();
+                    if ($tx) {
+                        DB::table('customers')->where('id', $o->customer_id)->increment('wallet_balance', (float) $tx->amount);
+                        DB::table('wallet_transactions')->where('id', $tx->id)->delete();
+                    }
+
+                    Notification::make()->title(__('Converted to Order'))->success()->send();
+
+                    $this->fillForm();
+                }),
+
+            Actions\Action::make('pdf')
+                ->label(__('PDF'))
+                ->icon('heroicon-o-arrow-down-tray')
+                ->url(fn () => route('admin.orders.pdf', $this->record))
+                ->openUrlInNewTab(),
+
+            Actions\DeleteAction::make(),
+        ];
+    }
+
+    protected function getRedirectUrl(): string
+    {
+        return static::getResource()::getUrl('edit', ['record' => $this->record]);
     }
 }
