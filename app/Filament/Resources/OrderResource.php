@@ -228,45 +228,49 @@ class OrderResource extends \Filament\Resources\Resource
                                             $search = trim($search);
                                             $limit  = 20;
 
-                                            // Always try fast, indexed SKU prefix first
-                                            $skuResults = Product::query()
+                                            // 1) Fast SKU prefix
+                                            $bySku = Product::query()
                                                 ->select('id', 'sku', 'title')
                                                 ->when($search !== '', fn ($q) =>
-                                                    $q->where('sku', 'like', $search.'%') // uses idx on sku
+                                                    $q->where('sku', 'like', $search.'%')
                                                 )
                                                 ->orderBy('sku')
                                                 ->limit($limit)
                                                 ->get();
 
-                                            $results = collect($skuResults);
+                                            $results = collect($bySku);
 
-                                            // If we still need more, try FULLTEXT first; if not present, gracefully fall back to title prefix
-                                            if ($results->count() < $limit && $search !== '') {
-                                                $remaining = $limit - $results->count();
+                                            if ($search !== '' && $results->count() < $limit) {
+                                                $remaining   = $limit - $results->count();
                                                 $existingIds = $results->pluck('id')->all();
 
+                                                // 2) Try FULLTEXT first (fast if index exists)
                                                 try {
-                                                    // Try FULLTEXT (requires index ft_products_title_sku)
-                                                    $fulltext = Product::query()
+                                                    $byFulltext = Product::query()
                                                         ->select('id', 'sku', 'title')
                                                         ->whereRaw("MATCH (title, sku) AGAINST (? IN BOOLEAN MODE)", [$search.'*'])
                                                         ->whereNotIn('id', $existingIds)
                                                         ->limit($remaining)
                                                         ->get();
 
-                                                    $results = $results->concat($fulltext);
+                                                    $results = $results->concat($byFulltext);
+                                                    $existingIds = $results->pluck('id')->all();
                                                 } catch (\Illuminate\Database\QueryException $e) {
-                                                    // Error 1191 = FULLTEXT index missing → fallback to indexed title prefix search
-                                                    // Build an ANDed series of prefix terms for multi-word searches, but keep it index-friendly:
-                                                    // Use only the first word for prefix (indexed), and the rest as broad contains (small result set anyway)
+                                                    // no FULLTEXT index: fall back to title prefix
+                                                }
+
+                                                // 3) TITLE prefix fallback (always runs if we still need more)
+                                                if ($results->count() < $limit) {
+                                                    $remaining = $limit - $results->count();
+
+                                                    // multi-word: use first word as prefix, rest as contains
                                                     $words = preg_split('/\s+/u', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [];
                                                     $first = $words[0] ?? $search;
 
-                                                    $fallback = Product::query()
+                                                    $byTitlePrefix = Product::query()
                                                         ->select('id', 'sku', 'title')
-                                                        ->where('title', 'like', $first.'%') // uses idx on title
+                                                        ->where('title', 'like', $first.'%')   // will use idx on title
                                                         ->when(count($words) > 1, function ($q) use ($words) {
-                                                            // extra words as contains filters (may not use index but the set is already reduced by prefix)
                                                             foreach (array_slice($words, 1) as $w) {
                                                                 $q->where('title', 'like', '%'.$w.'%');
                                                             }
@@ -276,7 +280,7 @@ class OrderResource extends \Filament\Resources\Resource
                                                         ->limit($remaining)
                                                         ->get();
 
-                                                    $results = $results->concat($fallback);
+                                                    $results = $results->concat($byTitlePrefix);
                                                 }
                                             }
 
@@ -284,6 +288,7 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $p->id => "{$p->sku} — ".str($p->title)->limit(70),
                                             ])->toArray();
                                         })
+
 
                                         ->getOptionLabelUsing(function ($value): ?string {
                                             if (!$value) return null;
