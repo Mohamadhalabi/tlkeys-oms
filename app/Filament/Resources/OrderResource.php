@@ -29,6 +29,7 @@ use Illuminate\Support\HtmlString;
 use App\Models\Order as OrderModel;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Support\Facades\Cache;
 
 class OrderResource extends \Filament\Resources\Resource
 {
@@ -57,23 +58,23 @@ class OrderResource extends \Filament\Resources\Resource
                     Section::make(__('orders.type_parties'))->schema([
                         Grid::make(12)->schema([
 
-                        Select::make('type')
-                            ->label(__('orders.type'))
-                            ->options([
-                                'proforma' => __('orders.proforma'),
-                                'order'    => __('orders.order'),
-                            ])
-                            ->default('proforma')
-                            ->required()
-                            ->live() // 👈 make the field reactive so dependent fields update immediately
-                            ->afterStateUpdated(function (Get $get, Set $set) {
-                                // Optional: when switching back to proforma, clear order-only fields
-                                if ($get('type') !== 'order') {
-                                    $set('status', null);
-                                    $set('payment_status', null);
-                                }
-                            })
-                            ->columnSpan(3),
+                            Select::make('type')
+                                ->label(__('orders.type'))
+                                ->options([
+                                    'proforma' => __('orders.proforma'),
+                                    'order'    => __('orders.order'),
+                                ])
+                                ->default('proforma')
+                                ->required()
+                                ->live()
+                                ->afterStateUpdated(function (Get $get, Set $set) {
+                                    if ($get('type') !== 'order') {
+                                        $set('status', null);
+                                        $set('payment_status', null);
+                                        $set('paid_amount', 0);
+                                    }
+                                })
+                                ->columnSpan(3),
 
                             Select::make('branch_id')
                                 ->label(__('orders.branch'))
@@ -126,10 +127,14 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->limit(50)
                                         ->pluck('name', 'id');
                                 })
-                                ->getOptionLabelUsing(fn ($value): ?string => Customer::find($value)?->name)
+                                ->getOptionLabelUsing(function ($value): ?string {
+                                    if (!$value) return null;
+                                    return Cache::remember("customer:name:$value", 86400, function () use ($value) {
+                                        return Customer::whereKey($value)->value('name');
+                                    });
+                                })
                                 ->columnSpan(12),
 
-                            // Only for type=order
                             Select::make('status')
                                 ->label(__('orders.status'))
                                 ->options([
@@ -146,23 +151,22 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->visible(fn (Get $get) => $get('type') === 'order')
                                 ->columnSpan(6),
 
-                                Select::make('payment_status')
-                                    ->label(__('orders.payment_status'))
-                                    ->options([
-                                        'unpaid'  => __('orders.unpaid'),
-                                        'partial' => __('orders.partial'),   // 👈 make sure this key exists
-                                        'paid'    => __('orders.paid'),
-                                    ])
-                                    ->required(fn (Get $get) => $get('type') === 'order')
-                                    ->visible(fn (Get $get) => $get('type') === 'order')
-                                    ->live() // 👈 so paid_amount visibility updates instantly
-                                    ->afterStateUpdated(function (Get $get, Set $set, ?string $state) {
-                                        // Clear paid_amount when not partial
-                                        if ($state !== 'partial') {
-                                            $set('paid_amount', 0);
-                                        }
-                                    })
-                                    ->columnSpan(6),
+                            Select::make('payment_status')
+                                ->label(__('orders.payment_status'))
+                                ->options([
+                                    'unpaid'  => __('orders.unpaid'),
+                                    'partial' => __('orders.partial'),
+                                    'paid'    => __('orders.paid'),
+                                ])
+                                ->required(fn (Get $get) => $get('type') === 'order')
+                                ->visible(fn (Get $get) => $get('type') === 'order')
+                                ->live()
+                                ->afterStateUpdated(function (Get $get, Set $set, ?string $state) {
+                                    if ($state !== 'partial') {
+                                        $set('paid_amount', 0);
+                                    }
+                                })
+                                ->columnSpan(6),
                         ]),
                     ]),
 
@@ -221,21 +225,52 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->searchable()
                                         ->preload(false)
                                         ->getSearchResultsUsing(function (string $search) {
-                                            return Product::query()
+                                            $search = trim($search);
+                                            $limit  = 20;
+
+                                            // 1) Fast SKU prefix (uses idx on sku)
+                                            $bySku = Product::query()
                                                 ->select('id', 'sku', 'title')
-                                                ->where(fn ($q) => $q->where('sku', 'like', "%{$search}%")
-                                                    ->orWhere('title', 'like', "%{$search}%"))
-                                                ->limit(50)
-                                                ->get()
-                                                ->mapWithKeys(fn (Product $p) => [
-                                                    $p->id => "{$p->sku} — " . str($p->title)->limit(70),
-                                                ])->toArray();
+                                                ->when($search !== '', fn ($q) =>
+                                                    $q->where('sku', 'like', $search.'%')
+                                                )
+                                                ->orderBy('sku')
+                                                ->limit($limit)
+                                                ->get();
+
+                                            $results = collect($bySku);
+
+                                            // 2) FULLTEXT fallback (boolean mode with wildcard)
+                                            if ($search !== '' && $results->count() < $limit) {
+                                                $remaining = $limit - $results->count();
+
+                                                $byFulltext = Product::query()
+                                                    ->select('id', 'sku', 'title')
+                                                    ->whereRaw("MATCH (title, sku) AGAINST (? IN BOOLEAN MODE)", [$search.'*'])
+                                                    ->limit($remaining)
+                                                    ->get();
+
+                                                $existingIds = $results->pluck('id')->all();
+                                                $byFulltext  = $byFulltext->whereNotIn('id', $existingIds);
+
+                                                $results = $results->concat($byFulltext);
+                                            }
+
+                                            return $results->mapWithKeys(fn (Product $p) => [
+                                                $p->id => "{$p->sku} — ".str($p->title)->limit(70),
+                                            ])->toArray();
                                         })
-                                        ->getOptionLabelUsing(fn ($value): ?string => Product::find($value)?->title)
+                                        ->getOptionLabelUsing(function ($value): ?string {
+                                            if (!$value) return null;
+                                            return Cache::remember("product:title:$value", 86400, function () use ($value) {
+                                                return Product::whereKey($value)->value('title');
+                                            });
+                                        })
                                         ->required()
                                         ->live()
                                         ->afterStateUpdated(function ($state, Get $get, Set $set) {
                                             if ($state) {
+                                                // duplicate guard — early exit & notify
                                                 $rows = $get('../../items') ?? [];
                                                 $count = 0;
                                                 foreach ($rows as $row) {
@@ -248,24 +283,42 @@ class OrderResource extends \Filament\Resources\Resource
                                                 }
                                             }
 
+                                            $branchId = (int) ($get('../../branch_id') ?? 0);
+
+                                            // One joined fetch for product + branch stock
                                             $p = $state
-                                                ? Product::select('id','sku','price','sale_price','image')->find($state)
+                                                ? Product::query()
+                                                    ->leftJoin('product_branch as pb', function ($j) use ($branchId) {
+                                                        $j->on('pb.product_id', '=', 'products.id')
+                                                          ->where('pb.branch_id', '=', $branchId);
+                                                    })
+                                                    ->where('products.id', $state)
+                                                    ->first([
+                                                        'products.id',
+                                                        'products.sku',
+                                                        'products.price',
+                                                        'products.sale_price',
+                                                        'products.image',
+                                                        DB::raw('COALESCE(pb.stock, 0) as branch_stock'),
+                                                    ])
                                                 : null;
 
-                                            $base = (float) ($p?->sale_price ?? $p?->price ?? 0);
+                                            if (!$p) {
+                                                $set('product_id', null);
+                                                return;
+                                            }
+
+                                            $base = (float) ($p->sale_price ?? $p->price ?? 0);
                                             $rate = (float) ($get('../../exchange_rate') ?? 1);
                                             $converted = round($base * $rate, 2);
 
                                             $set('base_unit_usd', $base);
                                             $set('unit_price', $converted);
-                                            $set('sku', $p?->sku);
-                                            $set('thumb', self::productThumbUrl($p?->image));
-
+                                            $set('sku', $p->sku);
+                                            $set('thumb', self::productThumbUrl($p->image));
                                             if ((int) $get('qty') <= 0) $set('qty', 1);
 
-                                            $branchId = (int) ($get('../../branch_id') ?? 0);
-                                            $stock    = self::branchStock($p?->id ?? 0, $branchId);
-                                            $set('stock_info', $stock);
+                                            $set('stock_info', (int) $p->branch_stock);
 
                                             self::recomputeLineAndTotals($get, $set);
                                         })
@@ -283,7 +336,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->numeric()
                                         ->minValue(1)
                                         ->default(1)
-                                        ->live()
+                                        ->live(debounce: 600) // reduce chatter
                                         ->afterStateUpdated(fn (Get $get, Set $set) => self::recomputeLineAndTotals($get, $set))
                                         ->columnSpan(2),
 
@@ -291,7 +344,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->label(__('orders.unit'))
                                         ->numeric()
                                         ->default(0)
-                                        ->live()
+                                        ->live(onBlur: true) // compute on blur, not every keystroke
                                         ->afterStateUpdated(fn (Get $get, Set $set) => self::recomputeLineAndTotals($get, $set))
                                         ->columnSpan(3),
 
@@ -318,7 +371,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             $customerId = (int) ($get('../../customer_id') ?? 0);
                                             $productId  = (int) ($get('product_id') ?? 0);
                                             if ($customerId > 0 && $productId > 0) {
-                                                $prev = \App\Filament\Resources\OrderResource::previousCustomerSales($customerId, $productId, 10);
+                                                $prev = self::previousCustomerSales($customerId, $productId, 10);
                                                 if (!empty($prev)) {
                                                     $items = array_map(function ($row) {
                                                         $price = number_format((float)$row['unit_price'], 2);
@@ -370,7 +423,10 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->live()
                                 ->afterStateUpdated(function (string $state, Get $get, Set $set) {
                                     $oldRate = (float) ($get('exchange_rate') ?? 1.0);
-                                    $newRate = (float) (CurrencyRate::where('code', $state)->value('usd_to_currency') ?? 1);
+                                    $newRate = Cache::remember("rate:$state", 3600, function () use ($state) {
+                                        return (float) (CurrencyRate::where('code', $state)->value('usd_to_currency') ?? 1);
+                                    });
+
                                     $set('exchange_rate', $newRate);
 
                                     $rows = $get('items') ?? [];
@@ -415,7 +471,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->default(0)
                                 ->dehydrated(true)
-                                ->live()
+                                ->live(onBlur: true)
                                 ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
                                 ->columnSpan(6),
 
@@ -424,7 +480,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->default(0)
                                 ->dehydrated(true)
-                                ->live()
+                                ->live(onBlur: true)
                                 ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
                                 ->columnSpan(6),
 
@@ -434,16 +490,15 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->default(0)
                                 ->dehydrated(true)
-                                ->live()
+                                ->live(onBlur: true)
                                 ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
                                 ->columnSpan(6),
 
-                            // NEW: Paid amount (only for Orders)
                             TextInput::make('paid_amount')
                                 ->label(__('orders.paid_amount'))
                                 ->numeric()
                                 ->minValue(0)
-                                ->helperText(__('orders.paid_amount_hint')) // optional, add key below
+                                ->helperText(__('orders.paid_amount_hint'))
                                 ->default(0)
                                 ->visible(fn (Get $get) =>
                                     $get('type') === 'order' && $get('payment_status') === 'partial'
@@ -454,7 +509,6 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->dehydrated(true)
                                 ->live(onBlur: true)
                                 ->afterStateUpdated(function (Get $get, Set $set, $state) {
-                                    // Clamp to total, never negative
                                     $total = (float) ($get('total') ?? 0);
                                     $val   = max(0, min((float) $state, $total));
                                     if ($val !== (float) $state) {
@@ -489,13 +543,13 @@ class OrderResource extends \Filament\Resources\Resource
                 TextColumn::make('customer.name')->label(__('orders.customer'))->searchable()->toggleable(),
 
                 TextColumn::make('subtotal')
-                    ->money(fn (OrderModel $record) => $record->currency ?: 'USD')
                     ->label(__('orders.subtotal'))
+                    ->formatStateUsing(fn (OrderModel $r) => number_format((float)$r->subtotal, 2).' '.($r->currency ?? 'USD'))
                     ->sortable(),
 
                 TextColumn::make('total')
-                    ->money(fn (OrderModel $record) => $record->currency ?: 'USD')
                     ->label(__('orders.total'))
+                    ->formatStateUsing(fn (OrderModel $r) => number_format((float)$r->total, 2).' '.($r->currency ?? 'USD'))
                     ->sortable(),
 
                 TextColumn::make('created_at')
@@ -598,10 +652,13 @@ class OrderResource extends \Filament\Resources\Resource
         if (!$image) return null;
         if (preg_match('~^https?://~i', $image)) return $image;
         if (str_starts_with($image, 'storage/')) return url($image);
-        try {
-            return Storage::disk('public')->url(ltrim($image, '/'));
-        } catch (\Throwable $e) {
-            return null;
-        }
+
+        return Cache::remember("thumb:$image", 86400, function () use ($image) {
+            try {
+                return Storage::disk('public')->url(ltrim($image, '/'));
+            } catch (\Throwable $e) {
+                return null;
+            }
+        });
     }
 }
