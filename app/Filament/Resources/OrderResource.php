@@ -228,7 +228,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             $search = trim($search);
                                             $limit  = 20;
 
-                                            // 1) Fast SKU prefix
+                                            // 1) SKU prefix (fast, uses idx_products_sku)
                                             $bySku = Product::query()
                                                 ->select('id', 'sku', 'title')
                                                 ->when($search !== '', fn ($q) =>
@@ -238,56 +238,53 @@ class OrderResource extends \Filament\Resources\Resource
                                                 ->limit($limit)
                                                 ->get();
 
-                                            $results = collect($bySku);
+                                            $results     = collect($bySku);
+                                            $existingIds = $results->pluck('id')->all();
 
                                             if ($search !== '' && $results->count() < $limit) {
-                                                $remaining   = $limit - $results->count();
+                                                $remaining = $limit - $results->count();
+
+                                                // 2) TITLE prefix (fast, uses idx_products_title)
+                                                $words = preg_split('/\s+/u', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                                                $first = $words[0] ?? $search;
+
+                                                $byTitlePrefix = Product::query()
+                                                    ->select('id', 'sku', 'title')
+                                                    ->where('title', 'like', $first.'%')
+                                                    ->when(count($words) > 1, function ($q) use ($words) {
+                                                        foreach (array_slice($words, 1) as $w) {
+                                                            $q->where('title', 'like', '%'.$w.'%');
+                                                        }
+                                                    })
+                                                    ->whereNotIn('id', $existingIds)
+                                                    ->orderBy('title')
+                                                    ->limit($remaining)
+                                                    ->get();
+
+                                                $results     = $results->concat($byTitlePrefix);
                                                 $existingIds = $results->pluck('id')->all();
+                                            }
 
-                                                // 2) Try FULLTEXT first (fast if index exists)
-                                                try {
-                                                    $byFulltext = Product::query()
-                                                        ->select('id', 'sku', 'title')
-                                                        ->whereRaw("MATCH (title, sku) AGAINST (? IN BOOLEAN MODE)", [$search.'*'])
-                                                        ->whereNotIn('id', $existingIds)
-                                                        ->limit($remaining)
-                                                        ->get();
+                                            if ($search !== '' && $results->count() < $limit) {
+                                                $remaining = $limit - $results->count();
 
-                                                    $results = $results->concat($byFulltext);
-                                                    $existingIds = $results->pluck('id')->all();
-                                                } catch (\Illuminate\Database\QueryException $e) {
-                                                    // no FULLTEXT index: fall back to title prefix
-                                                }
+                                                // 3) LAST RESORT (tiny contains scan, still limited to 20)
+                                                $byTitleContains = Product::query()
+                                                    ->select('id', 'sku', 'title')
+                                                    ->where('title', 'like', '%'.$search.'%')
+                                                    ->whereNotIn('id', $existingIds)
+                                                    ->orderByRaw('LOCATE(?, title)', [$search]) // better ranking
+                                                    ->limit($remaining)
+                                                    ->get();
 
-                                                // 3) TITLE prefix fallback (always runs if we still need more)
-                                                if ($results->count() < $limit) {
-                                                    $remaining = $limit - $results->count();
-
-                                                    // multi-word: use first word as prefix, rest as contains
-                                                    $words = preg_split('/\s+/u', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-                                                    $first = $words[0] ?? $search;
-
-                                                    $byTitlePrefix = Product::query()
-                                                        ->select('id', 'sku', 'title')
-                                                        ->where('title', 'like', $first.'%')   // will use idx on title
-                                                        ->when(count($words) > 1, function ($q) use ($words) {
-                                                            foreach (array_slice($words, 1) as $w) {
-                                                                $q->where('title', 'like', '%'.$w.'%');
-                                                            }
-                                                        })
-                                                        ->whereNotIn('id', $existingIds)
-                                                        ->orderBy('title')
-                                                        ->limit($remaining)
-                                                        ->get();
-
-                                                    $results = $results->concat($byTitlePrefix);
-                                                }
+                                                $results = $results->concat($byTitleContains);
                                             }
 
                                             return $results->mapWithKeys(fn (Product $p) => [
                                                 $p->id => "{$p->sku} — ".str($p->title)->limit(70),
                                             ])->toArray();
                                         })
+
 
 
                                         ->getOptionLabelUsing(function ($value): ?string {
