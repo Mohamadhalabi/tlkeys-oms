@@ -80,9 +80,11 @@ class CustomerResource extends Resource
                 Tables\Columns\TextColumn::make('phone')->label(__('Phone'))->searchable(),
                 Tables\Columns\TextColumn::make('wallet_balance')->label(__('Wallet balance'))->numeric()->sortable(),
 
-                Tables\Columns\TextColumn::make('seller.name')
-                    ->label(__('Seller'))
-                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('seller.name')
+                    ->label('Created by')
+                    ->placeholder('—')
+                    ->sortable()
+                    ->toggleable(),
 
                 Tables\Columns\TextColumn::make('created_at')->label(__('Created at'))->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('updated_at')->label(__('Updated at'))->dateTime()->sortable()->toggleable(isToggledHiddenByDefault: true),

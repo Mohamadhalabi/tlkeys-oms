@@ -35,6 +35,9 @@ class Order extends Model
             if (empty($order->code)) {
                 $order->code = self::generateUniqueCode('TLO', 6);
             }
+            if (blank($order->seller_id) && auth()->check() && auth()->user()->hasAnyRole(['Seller','seller'])) {
+                $order->seller_id = auth()->id();
+            }
         });
     }
 

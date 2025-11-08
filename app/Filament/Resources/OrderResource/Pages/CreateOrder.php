@@ -18,8 +18,11 @@ class CreateOrder extends CreateRecord
     protected function mutateFormDataBeforeCreate(array $data): array
     {
         $user = Auth::user();
-        $data['seller_id'] = $user?->hasRole('Seller') ? $user->id : ($user?->hasRole('Admin') ? null : $user?->id);
-
+        if ($user?->hasAnyRole(['Seller','seller'])) {
+            $data['seller_id'] = $user->id;
+        } elseif (!$user?->hasAnyRole(['Admin','admin'])) {
+            $data['seller_id'] = $user?->id;
+        }
         if (($data['type'] ?? 'proforma') !== 'order') {
             $data['status']          = $data['status'] ?? 'draft';
             $data['payment_status']  = $data['payment_status'] ?? 'unpaid';

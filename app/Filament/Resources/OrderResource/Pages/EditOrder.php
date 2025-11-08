@@ -216,4 +216,14 @@ class EditOrder extends EditRecord
     {
         return static::getResource()::getUrl('edit', ['record' => $this->record]);
     }
+
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        if (auth()->check()
+            && auth()->user()->hasAnyRole(['Seller','seller'])
+            && empty($this->record->seller_id)) {
+            $data['seller_id'] = auth()->id();
+        }
+        return $data;
+    }
 }

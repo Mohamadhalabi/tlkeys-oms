@@ -701,6 +701,14 @@ class OrderResource extends \Filament\Resources\Resource
                     ->sortable(),
                 TextColumn::make('branch.name')->label(__('orders.branch'))->sortable()->toggleable(),
                 TextColumn::make('customer.name')->label(__('orders.customer'))->searchable()->toggleable(),
+                // TextColumn::make('created_by')
+                //     ->label('Created by')
+                //     ->formatStateUsing(fn (OrderModel $r) =>
+                //         $r->seller?->name
+                //         ?? $r->customer?->seller?->name
+                //         ?? '—'
+                //     )
+                //     ->toggleable(),
 
                 TextColumn::make('subtotal')
                     ->label(__('orders.subtotal'))
@@ -822,4 +830,21 @@ class OrderResource extends \Filament\Resources\Resource
             }
         });
     }
+
+    public static function getEloquentQuery(): EloquentBuilder
+    {
+        $query = parent::getEloquentQuery()
+            ->with(['seller','customer.seller']); // ⬅️ eager
+
+        $user = Auth::user();
+        if ($user && !$user->hasAnyRole(['Admin','admin'])) {
+            $query->where(function (EloquentBuilder $q) use ($user) {
+                $q->where('seller_id', $user->id)
+                ->orWhereHas('customer', fn (EloquentBuilder $cq) => $cq->where('seller_id', $user->id));
+            });
+        }
+
+        return $query;
+    }
+
 }
