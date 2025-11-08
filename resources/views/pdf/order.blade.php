@@ -2,31 +2,20 @@
 @php
     use Illuminate\Support\Str;
 
-    /* ================= PRECISION HELPERS (half-up) ================= */
-    // round half-up to 2dp or 4dp using BCMath
-    $r2 = function (string $v) {
-        return bccomp($v, '0', 10) >= 0
-            ? bcadd($v, '0.005', 2)      // +0.005 then cut to 2dp
-            : bcsub($v, '0.005', 2);     // -0.005 then cut to 2dp
-    };
-    $r4 = function (string $v) {
-        return bccomp($v, '0', 10) >= 0
-            ? bcadd($v, '0.00005', 4)
-            : bcsub($v, '0.00005', 4);
-    };
+    /* ================= PRECISION HELPERS (half-up via BCMath) ================= */
     $mul = fn($a,$b,$s=8) => bcmul((string)$a,(string)$b,$s);
     $add = fn($a,$b,$s=8) => bcadd((string)$a,(string)$b,$s);
     $sub = fn($a,$b,$s=8) => bcsub((string)$a,(string)$b,$s);
 
     // UI formatters
-    $fmt2  = fn($v) => number_format((float)$v, 2, '.', ',');
+    $fmt2   = fn($v) => number_format((float)$v, 2, '.', ',');
     $fmtPct = fn($v) => rtrim(rtrim(number_format((float)$v, 2, '.', ','), '0'), '.');
 
     // Locale & direction
     $locale = app()->getLocale();
     $isRtl  = ($locale === 'ar');
 
-    // Company block
+    // Company block (you can override via view data if needed)
     $companyName  = $company ?? config('app.name', 'Techno Lock Keys');
     $companyAddr1 = $company_addr1 ?? 'Industrial Area 5, Maleha Street';
     $companyAddr2 = $company_addr2 ?? 'United Arab Emirates – Sharjah';
@@ -42,10 +31,8 @@
     $docDate    = $order->created_at?->format('d.m.Y H:i');
     $customerId = $order->customer?->code ?? ($order->customer_id ? ('TLK' . $order->customer_id) : '-');
 
-    // Currency context
-    $rate = (string) max(1.0, (float)($order->exchange_rate ?? 1));   // USD -> currency
-    $cur  = $order->currency ?: 'USD';
-    $fx   = fn(string $usd) => $r2($mul($usd, $rate, 8));              // convert then round 2dp
+    // Currency context (NO FX here; unit_price is already stored in order currency)
+    $cur = $order->currency ?: 'USD';
     $brandColor = '#2D83B0';
 
     // Customer
@@ -68,7 +55,7 @@
     $statusPretty = str_replace('_', ' ', $status);
 
     // Logo (absolute "file://..." was prepared in controller)
-    $logo = $logoPath ?: null;
+    $logo = $logoPath ?? null;
 
     // Localized product title
     $pickTitle = function ($p, $fallback = '') use ($locale) {
@@ -78,46 +65,42 @@
         return $p->title ?? $fallback;
     };
 
-    /* =================== RECOMPUTE MONEY IN USD ==================== */
-    // We DO NOT trust DB line_total/subtotal/total here (they may be pre-rounded).
-    // Build precise USD sums from qty * unit_price.
-    $linesUsd = '0.00000000';
+    /* =================== RECOMPUTE TOTALS IN ORDER CURRENCY ==================== */
+    // Build precise sums from qty * unit_price (already in order currency).
+    $lines = '0.00000000';
     foreach ($order->items as $row) {
-        $line = $mul((string)$row->qty, (string)$row->unit_price, 8); // exact qty*unit_price (USD)
-        $linesUsd = $add($linesUsd, $line, 8);
-        // stash per-row computed USD for table
-        $row->__pdf_line_usd = $line;
+        $line = $mul((string)$row->qty, (string)$row->unit_price, 8); // exact qty*unit_price
+        $lines = $add($lines, $line, 8);
+        // stash per-row computed total for table rendering
+        $row->__pdf_line_currency = $line;
     }
 
-    // Other amounts in USD pulled from order (already USD)
-    $discountUsd = (string) ($order->discount ?? 0);
-    $shippingUsd = (string) ($order->shipping ?? 0);
+    $subtotal   = $lines;                                 // items only
+    $discount   = (string) ($order->discount ?? 0);       // in order currency
+    $shipping   = (string) ($order->shipping ?? 0);       // in order currency
 
-    // Optional % service fee (legacy)
-    $feesPct     = isset($order->service_fees_percent) ? (float)$order->service_fees_percent : 0.0;
-    $feesUsd     = '0';
+    // Percent fees (match Filament field name)
+    $feesPct    = (float) ($order->extra_fees_percent ?? 0);
+    $fees       = '0';
     if ($feesPct > 0) {
-        $base = $add($sub($linesUsd, $discountUsd, 8), $shippingUsd, 8);
-        $feesUsd = $mul($base, (string)($feesPct/100), 8);
+        $base = $add($sub($subtotal, $discount, 8), $shipping, 8);
+        $fees = $mul($base, (string)($feesPct/100), 8);
     }
 
-    // Flat extra fees in USD
-    $extraFeesUsd = (string) ($order->extra_fees ?? 0);
+    // Flat extra fees (if you store any flat amount; keep as 0 if unused)
+    $extraFees  = (string) ($order->extra_fees ?? 0);
 
-    // Subtotal / Grand total (USD, precise)
-    $subtotalUsd  = $linesUsd; // items only
-    $grandUsd     = $add(
-                        $add(
-                            $sub($subtotalUsd, $discountUsd, 8),
-                            $shippingUsd, 8
-                        ),
-                        $add($feesUsd, $extraFeesUsd, 8),
-                        8
-                    );
+    $grand      = $add(
+                    $add(
+                        $sub($subtotal, $discount, 8),
+                        $shipping, 8
+                    ),
+                    $add($fees, $extraFees, 8),
+                    8
+                  );
 
-    $paidUsd      = (string) ($order->paid_amount ?? 0);
-    $dueUsd       = bccomp($grandUsd, $paidUsd, 8) > 0 ? $sub($grandUsd, $paidUsd, 8) : '0';
-
+    $paid       = (string) ($order->paid_amount ?? 0);
+    $due        = bccomp($grand, $paid, 8) > 0 ? $sub($grand, $paid, 8) : '0';
 @endphp
 
 <!doctype html>
@@ -175,7 +158,7 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
   <div class="left">
     @if($showCompanyBlock)
       @if($logo)
-         <img class="logo" width="" src="https://dev-srv.tlkeys.com/storage/Logo/techno-lock-desktop-logo.jpg">
+         <img class="logo" src="{{ $logo }}" alt="Logo">
       @endif
       <div class="muted">
         {{ $companyAddr1 }} <br>
@@ -242,13 +225,11 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
       @php
         $p     = $row->product;
         $sku   = $p->sku ?? ($row->sku ?? '-');
-        $src   = $imgMap[$row->product_id] ?? null;
+        $src   = $imgMap[$row->product_id] ?? null;   // provided by controller
         $title = $pickTitle($p, $row->title ?? '');
 
-        // ALWAYS compute line from qty * unit_price in USD (ignore DB line_total)
-        $lineUsd = $row->__pdf_line_usd ?? '0';
-        $unitFx  = $fx((string)$row->unit_price);   // converted & rounded 2dp
-        $lineFx  = $fx($lineUsd);                   // converted & rounded 2dp
+        $unit  = (string)$row->unit_price;                        // already in order currency
+        $line  = (string)($row->__pdf_line_currency ?? '0');      // qty*unit (currency)
       @endphp
       <tr>
         <td style="text-align:center;">{{ $i + 1 }}</td>
@@ -256,22 +237,23 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
         <td><div style="font-weight:600;margin-bottom:2px;">{{ $title }}</div></td>
         <td class="sku">{{ $sku ?: '—' }}</td>
         <td class="qty">{{ (int)$row->qty }}</td>
-        <td class="right"><span>{{ $cur }} {{ $fmt2($unitFx) }}</span></td>
-        <td class="right"><span>{{ $cur }} {{ $fmt2($lineFx) }}</span></td>
+        <td class="right"><span>{{ $cur }} {{ $fmt2($unit) }}</span></td>
+        <td class="right"><span>{{ $cur }} {{ $fmt2($line) }}</span></td>
       </tr>
     @endforeach
   </tbody>
 </table>
 
 @php
-    $subtotalFx = $fx($subtotalUsd);
-    $discountFx = $fx($discountUsd);
-    $shippingFx = $fx($shippingUsd);
-    $feesFx     = $fx($feesUsd);
-    $extraFx    = $fx($extraFeesUsd);
-    $grandFx    = $fx($grandUsd);
-    $paidFx     = $fx($paidUsd);
-    $dueFx      = $fx($dueUsd);
+    // Totals are already in the order currency
+    $subtotalFx = $subtotal;
+    $discountFx = $discount;
+    $shippingFx = $shipping;
+    $feesFx     = $fees;
+    $extraFx    = $extraFees;
+    $grandFx    = $grand;
+    $paidFx     = $paid;
+    $dueFx      = $due;
 @endphp
 
 <div class="totalsbox">
@@ -280,7 +262,7 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
       <td class="label">{{ __('Subtotal') }}</td>
       <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($subtotalFx) }}</span></td>
     </tr>
-    @if(bccomp($discountUsd,'0',8) > 0)
+    @if(bccomp($discountFx,'0',8) > 0)
     <tr>
       <td class="label">{{ __('Discount') }}</td>
       <td class="val">− <span class="bidi">{{ $cur }} {{ $fmt2($discountFx) }}</span></td>
@@ -296,7 +278,7 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
       <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($feesFx) }}</span></td>
     </tr>
     @endif
-    @if(bccomp($extraFeesUsd,'0',8) > 0)
+    @if(bccomp($extraFx,'0',8) > 0)
     <tr>
       <td class="label">{{ __('Extra Fees') }}</td>
       <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($extraFx) }}</span></td>
@@ -306,7 +288,7 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
       <td class="label">{{ __('Total') }}</td>
       <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($grandFx) }}</span></td>
     </tr>
-    @if(bccomp($paidUsd,'0',8) > 0)
+    @if(bccomp($paidFx,'0',8) > 0)
     <tr>
       <td class="label">{{ __('Paid') }}</td>
       <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($paidFx) }}</span></td>
