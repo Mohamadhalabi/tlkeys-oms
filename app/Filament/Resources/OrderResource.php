@@ -19,6 +19,9 @@ use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Section;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\Actions;
+use Filament\Forms\Components\Actions\Action;
 use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Tables\Columns\TextColumn;
@@ -173,6 +176,56 @@ class OrderResource extends \Filament\Resources\Resource
                     Section::make(__('orders.items'))
                         ->description(__('orders.items_desc'))
                         ->schema([
+
+                            /* ==== Header action: Add item at TOP ==== */
+                            Actions::make([
+                                Action::make('add_item_top')
+                                    ->label('+ ' . __('orders.add_item'))
+                                    ->button()
+                                    ->action(function (Get $get, Set $set) {
+                                        $items = $get('items') ?? [];
+                                        $items = array_values(is_array($items) ? $items : []);
+
+                                        // new blank row
+                                        $new = [
+                                            'product_id'    => null,
+                                            'sku'           => null,
+                                            'qty'           => 1,
+                                            'unit_price'    => 0,
+                                            'line_total'    => 0,
+                                            'base_unit_usd' => 0,
+                                            'thumb'         => null,
+                                            'stock_info'    => null,
+                                            'note'          => null,
+                                        ];
+
+                                        array_unshift($items, $new);
+
+                                        $i = 1; $subtotal = 0.0;
+                                        foreach ($items as $idx => &$row) {
+                                            $row = is_array($row) ? $row : [];
+                                            $row['row_index']  = $i++;
+                                            $q = (float)($row['qty'] ?? 0);
+                                            $u = (float)($row['unit_price'] ?? 0);
+                                            $row['line_total'] = round($q * $u, 2);
+                                            $subtotal += $row['line_total'];
+                                        }
+                                        unset($row);
+
+                                        $set('items', $items);
+
+                                        $discount = (float)($get('discount') ?? 0);
+                                        $shipping = (float)($get('shipping') ?? 0);
+                                        $feesPct  = (float)($get('extra_fees_percent') ?? 0);
+                                        $fees     = $subtotal * ($feesPct / 100.0);
+                                        $total    = max(0, $subtotal - $discount + $shipping + $fees);
+
+                                        $set('subtotal', round($subtotal, 2));
+                                        $set('total', round($total, 2));
+                                    }),
+                            ])->alignment('left'),
+
+                            /* ===== Repeater ===== */
                             Repeater::make('items')
                                 ->relationship(
                                     name: 'items',
@@ -181,6 +234,55 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->orderable('sort')
                                 ->defaultItems(0)
                                 ->columns(12)
+                                // Hide native add label so only header button is used
+                                ->addActionLabel('')
+
+                                ->live()
+                                ->afterStateUpdated(function (Get $get, Set $set, $state) {
+                                    // Normalize current state (handles add/delete)
+                                    $items = is_array($state) ? $state : ($get('items') ?? []);
+                                    $items = array_values(array_filter(
+                                        $items,
+                                        fn ($r) => is_array($r) // drop nulls/non-arrays left by deletes
+                                    ));
+
+                                    // If last row looks like a brand-new blank, move it to TOP
+                                    if (count($items) > 1) {
+                                        $last = $items[count($items) - 1];
+                                        $isBlankNew =
+                                            (empty($last['product_id'])) &&
+                                            (empty($last['sku'])) &&
+                                            ((int)($last['qty'] ?? 1) === 1) &&
+                                            ((float)($last['unit_price'] ?? 0) === 0.0);
+
+                                        if ($isBlankNew) {
+                                            array_pop($items);
+                                            array_unshift($items, $last);
+                                        }
+                                    }
+
+                                    // Re-number and totals
+                                    $i = 1; $subtotal = 0.0;
+                                    foreach ($items as $idx => $row) {
+                                        $qty  = (float) ($row['qty'] ?? 0);
+                                        $unit = (float) ($row['unit_price'] ?? 0);
+                                        $items[$idx]['row_index']  = $i++;
+                                        $items[$idx]['line_total'] = round($qty * $unit, 2);
+                                        $subtotal += $qty * $unit;
+                                    }
+
+                                    $set('items', $items);
+
+                                    $discount = (float)($get('discount') ?? 0);
+                                    $shipping = (float)($get('shipping') ?? 0);
+                                    $feesPct  = (float)($get('extra_fees_percent') ?? 0);
+                                    $fees     = $subtotal * ($feesPct / 100.0);
+                                    $total    = max(0, $subtotal - $discount + $shipping + $fees);
+
+                                    $set('subtotal', round($subtotal, 2));
+                                    $set('total', round($total, 2));
+                                })
+
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = (int) ($data['product_id'] ?? 0);
 
@@ -201,8 +303,9 @@ class OrderResource extends \Filament\Resources\Resource
                                 })
                                 ->mutateRelationshipDataBeforeSaveUsing(function (array $data): array {
                                     unset($data['thumb'],$data['row_index'],$data['stock_info'],$data['previous_sales'],$data['base_unit_usd']);
-                                    return $data;
+                                    return $data; // keep 'note'
                                 })
+
                                 ->schema([
                                     Placeholder::make('row_index_disp')
                                         ->label('#')
@@ -228,12 +331,27 @@ class OrderResource extends \Filament\Resources\Resource
                                             $search = trim($search);
                                             $limit  = 20;
 
-                                            // 1) SKU prefix (fast, uses idx_products_sku)
-                                            $bySku = Product::query()
-                                                ->select('id', 'sku', 'title')
-                                                ->when($search !== '', fn ($q) =>
-                                                    $q->where('sku', 'like', $search.'%')
-                                                )
+                                            $digitsOnly = preg_match('/^\d+$/', $search) === 1;
+
+                                            $skuQuery = Product::query()
+                                                ->select('id', 'sku', 'title');
+
+                                            if ($search !== '') {
+                                                if ($digitsOnly) {
+                                                    $skuQuery->where(function ($q) use ($search) {
+                                                        $q->where('sku', 'like', '%' . $search)      // ends with digits (TL3333)
+                                                          ->orWhere('sku', 'like', '%' . $search . '%');
+                                                    });
+                                                } else {
+                                                    $skuQuery->where(function ($q) use ($search) {
+                                                        $q->where('sku', 'like', $search . '%')
+                                                          ->orWhere('sku', 'like', '%' . $search . '%');
+                                                    });
+                                                }
+                                            }
+
+                                            $bySku = $skuQuery
+                                                ->orderByRaw('CASE WHEN sku LIKE ? THEN 0 ELSE 1 END', [$search.'%'])
                                                 ->orderBy('sku')
                                                 ->limit($limit)
                                                 ->get();
@@ -244,7 +362,6 @@ class OrderResource extends \Filament\Resources\Resource
                                             if ($search !== '' && $results->count() < $limit) {
                                                 $remaining = $limit - $results->count();
 
-                                                // 2) TITLE prefix (fast, uses idx_products_title)
                                                 $words = preg_split('/\s+/u', $search, -1, PREG_SPLIT_NO_EMPTY) ?: [];
                                                 $first = $words[0] ?? $search;
 
@@ -268,12 +385,11 @@ class OrderResource extends \Filament\Resources\Resource
                                             if ($search !== '' && $results->count() < $limit) {
                                                 $remaining = $limit - $results->count();
 
-                                                // 3) LAST RESORT (tiny contains scan, still limited to 20)
                                                 $byTitleContains = Product::query()
                                                     ->select('id', 'sku', 'title')
                                                     ->where('title', 'like', '%'.$search.'%')
                                                     ->whereNotIn('id', $existingIds)
-                                                    ->orderByRaw('LOCATE(?, title)', [$search]) // better ranking
+                                                    ->orderByRaw('LOCATE(?, title)', [$search])
                                                     ->limit($remaining)
                                                     ->get();
 
@@ -284,9 +400,6 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $p->id => "{$p->sku} — ".str($p->title)->limit(70),
                                             ])->toArray();
                                         })
-
-
-
                                         ->getOptionLabelUsing(function ($value): ?string {
                                             if (!$value) return null;
                                             return Cache::remember("product:title:$value", 86400, function () use ($value) {
@@ -297,7 +410,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->live()
                                         ->afterStateUpdated(function ($state, Get $get, Set $set) {
                                             if ($state) {
-                                                // duplicate guard — early exit & notify
                                                 $rows = $get('../../items') ?? [];
                                                 $count = 0;
                                                 foreach ($rows as $row) {
@@ -312,7 +424,6 @@ class OrderResource extends \Filament\Resources\Resource
 
                                             $branchId = (int) ($get('../../branch_id') ?? 0);
 
-                                            // One joined fetch for product + branch stock
                                             $p = $state
                                                 ? Product::query()
                                                     ->leftJoin('product_branch as pb', function ($j) use ($branchId) {
@@ -363,7 +474,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->numeric()
                                         ->minValue(1)
                                         ->default(1)
-                                        ->live(debounce: 600) // reduce chatter
+                                        ->live(debounce: 600)
                                         ->afterStateUpdated(fn (Get $get, Set $set) => self::recomputeLineAndTotals($get, $set))
                                         ->columnSpan(2),
 
@@ -371,7 +482,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->label(__('orders.unit'))
                                         ->numeric()
                                         ->default(0)
-                                        ->live(onBlur: true) // compute on blur, not every keystroke
+                                        ->live(onBlur: true)
                                         ->afterStateUpdated(fn (Get $get, Set $set) => self::recomputeLineAndTotals($get, $set))
                                         ->columnSpan(3),
 
@@ -421,20 +532,34 @@ class OrderResource extends \Filament\Resources\Resource
                                         })
                                         ->columnSpan(12),
 
+                                    // Per-item note
+                                    Textarea::make('note')
+                                        ->label(__('orders.item_note'))
+                                        ->placeholder(__('orders.item_note_placeholder'))
+                                        ->rows(2)
+                                        ->maxLength(500)
+                                        ->dehydrated(true)
+                                        ->columnSpan(12),
+
                                     TextInput::make('base_unit_usd')->hidden()->dehydrated(false),
                                     TextInput::make('row_index')->hidden()->dehydrated(false),
                                     TextInput::make('stock_info')->hidden()->dehydrated(false),
-                                ])
-                                ->live()
-                                ->afterStateUpdated(function (Get $get, Set $set) {
-                                    $rows = $get('items') ?? [];
-                                    $i = 1;
-                                    foreach (array_keys($rows) as $idx) {
-                                        $set("items.$idx.row_index", $i++);
-                                    }
-                                    self::recomputeTotals($get, $set);
-                                }),
+                                ]),
                         ]),
+
+                    // ===== Invoice note (printed at the bottom of PDF) =====
+                    Section::make(__('orders.invoice_note'))
+                        ->schema([
+                            Textarea::make('invoice_note')
+                                ->label(__('orders.invoice_note'))
+                                ->placeholder(__('orders.invoice_note_placeholder'))
+                                ->rows(3)
+                                ->maxLength(2000)
+                                ->dehydrated(true),
+                        ])
+                        ->collapsible()
+                        ->collapsed()
+                        ->columnSpanFull(),
 
                 ])->columnSpan(['default' => 12, 'xl' => 8]),
 
@@ -544,6 +669,14 @@ class OrderResource extends \Filament\Resources\Resource
                                 })
                                 ->columnSpan(12),
 
+                            TextInput::make('total')
+                                ->label(__('orders.total'))
+                                ->numeric()
+                                ->readOnly()
+                                ->default(0)
+                                ->dehydrated(true)
+                                ->columnSpan(12),
+
                         ]),
                     ])
                     ->extraAttributes([
@@ -611,8 +744,9 @@ class OrderResource extends \Filament\Resources\Resource
     public static function recomputeTotals(Get $get, Set $set, bool $calledFromItem = false): void
     {
         $items = $calledFromItem ? ($get('../../items') ?? []) : ($get('items') ?? []);
-        $subtotal = 0.0;
+        $items = array_values(array_filter($items, fn ($r) => is_array($r)));
 
+        $subtotal = 0.0;
         foreach ($items as $row) {
             $qty  = (float) ($row['qty'] ?? 0);
             $unit = (float) ($row['unit_price'] ?? 0);

@@ -45,11 +45,11 @@ class EditOrder extends EditRecord
 
         if (($data['type'] ?? 'proforma') === 'order') {
             $data['paid_amount'] = max(0, min((float)$data['paid_amount'], (float)$data['total']));
-            if ($data['payment_status'] === 'paid') {
+            if (($data['payment_status'] ?? 'unpaid') === 'paid') {
                 $data['paid_amount'] = (float) $data['total'];
             } elseif ($data['payment_status'] === 'unpaid') {
                 $data['paid_amount'] = 0.0;
-            } else { // partial
+            } else {
                 if ($data['paid_amount'] <= 0 || $data['paid_amount'] >= (float)$data['total']) {
                     $data['payment_status'] = ($data['paid_amount'] >= (float)$data['total']) ? 'paid' : 'unpaid';
                 }
@@ -59,11 +59,21 @@ class EditOrder extends EditRecord
         return $data;
     }
 
+    /**
+     * Build repeater rows for the form. Also:
+     *  - Order items by 'sort'
+     *  - Eager-load products with only existing columns
+     */
     protected function mutateFormDataBeforeFill(array $data): array
     {
         /** @var \App\Models\Order $order */
         $order = $this->getRecord();
-        $order->loadMissing(['items.product:id,sku,image,price,sale_price']);
+
+        // Ensure items are ordered by 'sort' and product is eager-loaded safely
+        $order->loadMissing([
+            'items' => fn ($q) => $q->orderBy('sort'),
+            'items.product' => fn ($q) => $q->select('id', 'sku', 'image', 'price', 'sale_price'),
+        ]);
 
         $rows = [];
         $i    = 1;
@@ -71,6 +81,8 @@ class EditOrder extends EditRecord
 
         foreach ($order->items as $item) {
             $p = $item->product;
+
+            // Base unit in USD (keep same logic but guard null product)
             $baseUsd = $rate > 0
                 ? round(((float) $item->unit_price) / $rate, 6)
                 : (float) ($p?->sale_price ?? $p?->price ?? 0);
@@ -85,6 +97,7 @@ class EditOrder extends EditRecord
                 'thumb'          => \App\Filament\Resources\OrderResource::productThumbUrl($p?->image),
                 'base_unit_usd'  => $baseUsd,
                 'stock_info'     => null,
+                'note'           => $item->note, // keep per-item note
             ];
         }
 
@@ -94,7 +107,6 @@ class EditOrder extends EditRecord
 
     private function applyWalletSideEffects(Order $order): void
     {
-        // If NOT a real order or no customer: remove any previous tx.
         if ($order->type !== 'order' || !$order->customer_id) {
             $tx = DB::table('wallet_transactions')->where('order_id', $order->id)->first();
             if ($tx) {
@@ -165,7 +177,6 @@ class EditOrder extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
-            // Convert Proforma -> Order
             Actions\Action::make('convert_to_order')
                 ->label(__('Convert to Order'))
                 ->icon('heroicon-o-arrows-right-left')
@@ -180,7 +191,6 @@ class EditOrder extends EditRecord
                         'payment_status'  => 'unpaid',
                         'paid_amount'     => 0.0,
                     ]);
-                    // unpaid => no wallet move, but ensure any previous tx is cleared
                     $tx = DB::table('wallet_transactions')->where('order_id', $o->id)->first();
                     if ($tx) {
                         DB::table('customers')->where('id', $o->customer_id)->increment('wallet_balance', (float) $tx->amount);

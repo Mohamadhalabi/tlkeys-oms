@@ -55,5 +55,10 @@ return [
         'partial' => 'Partial',
     'paid_amount' => 'Paid amount',
     'paid_amount_hint' => 'Enter the amount received for this order.',
+    'add_item' => 'Add item',
+    'item_note' => 'Item note',
+    'item_note_placeholder' => 'Internal/customer note for this item (shown on PDF).',
+    'invoice_note' => 'Invoice note (appears at bottom of PDF)',
+    'invoice_note_placeholder' => 'Any message or terms to print at the bottom of the invoice.',
 
 ];

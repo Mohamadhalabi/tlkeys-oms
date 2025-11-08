@@ -3,7 +3,6 @@
 namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
-use App\Models\Customer;
 use App\Models\Order;
 use Filament\Notifications\Notification;
 use Filament\Notifications\Actions\Action as NotificationAction;
@@ -35,7 +34,6 @@ class CreateOrder extends CreateRecord
         /** @var \App\Models\Order $order */
         $order = static::getModel()::create($data);
 
-        // Apply wallet side-effects (same rules as Edit)
         $this->applyWalletSideEffects($order);
 
         return $order;
@@ -57,14 +55,13 @@ class CreateOrder extends CreateRecord
             $data[$key] = is_numeric($val) ? (float) $val : $fallback;
         }
 
-        // Guard rails for payment combos
         if (($data['type'] ?? 'proforma') === 'order') {
             $data['paid_amount'] = max(0, min((float)$data['paid_amount'], (float)$data['total']));
             if ($data['payment_status'] === 'paid') {
                 $data['paid_amount'] = (float)$data['total'];
             } elseif ($data['payment_status'] === 'unpaid') {
                 $data['paid_amount'] = 0.0;
-            } else { // partial
+            } else {
                 if ($data['paid_amount'] <= 0 || $data['paid_amount'] >= (float)$data['total']) {
                     $data['payment_status'] = ($data['paid_amount'] >= (float)$data['total']) ? 'paid' : 'unpaid';
                 }
@@ -76,10 +73,7 @@ class CreateOrder extends CreateRecord
 
     private function applyWalletSideEffects(Order $order): void
     {
-        // No wallet moves for proforma or missing customer
-        if ($order->type !== 'order' || !$order->customer_id) {
-            return;
-        }
+        if ($order->type !== 'order' || !$order->customer_id) return;
 
         $tx = DB::table('wallet_transactions')->where('order_id', $order->id)->first();
 
@@ -112,12 +106,6 @@ class CreateOrder extends CreateRecord
                     'updated_at'  => now(),
                 ]);
                 DB::table('customers')->where('id', $order->customer_id)->decrement('wallet_balance', $amountToCharge);
-            }
-        } else {
-            // unpaid: ensure any prior tx is reversed
-            if ($tx) {
-                DB::table('customers')->where('id', $order->customer_id)->increment('wallet_balance', (float) $tx->amount);
-                DB::table('wallet_transactions')->where('id', $tx->id)->delete();
             }
         }
     }

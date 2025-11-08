@@ -2,20 +2,16 @@
 @php
     use Illuminate\Support\Str;
 
-    /* ================= PRECISION HELPERS (half-up via BCMath) ================= */
     $mul = fn($a,$b,$s=8) => bcmul((string)$a,(string)$b,$s);
     $add = fn($a,$b,$s=8) => bcadd((string)$a,(string)$b,$s);
     $sub = fn($a,$b,$s=8) => bcsub((string)$a,(string)$b,$s);
 
-    // UI formatters
     $fmt2   = fn($v) => number_format((float)$v, 2, '.', ',');
     $fmtPct = fn($v) => rtrim(rtrim(number_format((float)$v, 2, '.', ','), '0'), '.');
 
-    // Locale & direction
     $locale = app()->getLocale();
     $isRtl  = ($locale === 'ar');
 
-    // Company block (you can override via view data if needed)
     $companyName  = $company ?? config('app.name', 'Techno Lock Keys');
     $companyAddr1 = $company_addr1 ?? 'Industrial Area 5, Maleha Street';
     $companyAddr2 = $company_addr2 ?? 'United Arab Emirates – Sharjah';
@@ -26,16 +22,13 @@
     $branchCode   = $order->branch?->code ?? null;
     $showCompanyBlock = ($branchCode === 'AE');
 
-    // Codes / dates
     $docCode    = $order->code ?? ('TLO' . str_pad($order->id, 6, '0', STR_PAD_LEFT));
     $docDate    = $order->created_at?->format('d.m.Y H:i');
     $customerId = $order->customer?->code ?? ($order->customer_id ? ('TLK' . $order->customer_id) : '-');
 
-    // Currency context (NO FX here; unit_price is already stored in order currency)
     $cur = $order->currency ?: 'USD';
     $brandColor = '#2D83B0';
 
-    // Customer
     $customer   = $order->customer;
     $custName   = $customer->name ?? '-';
     $custEmail  = $customer->email ?? '';
@@ -44,20 +37,16 @@
     $custCity   = trim(($customer->city ?? ''));
     $custCountry= trim(($customer->country ?? ''));
     $custPostal = trim(($customer->postal_code ?? ''));
-
     $hasCustomerData = $customer && (
         ($custName && $custName !== '-') ||
         $custPhone || $custEmail || $custAddr || $custCity || $custCountry || $custPostal
     );
 
-    // Status
     $status       = strtolower((string)$order->payment_status);
     $statusPretty = str_replace('_', ' ', $status);
 
-    // Logo (absolute "file://..." was prepared in controller)
     $logo = $logoPath ?? null;
 
-    // Localized product title
     $pickTitle = function ($p, $fallback = '') use ($locale) {
         if (is_array($p?->title ?? null)) {
             return $p->title[$locale] ?? $p->title['en'] ?? reset($p->title) ?? $fallback;
@@ -65,29 +54,22 @@
         return $p->title ?? $fallback;
     };
 
-    /* =================== RECOMPUTE TOTALS IN ORDER CURRENCY ==================== */
-    // Build precise sums from qty * unit_price (already in order currency).
     $lines = '0.00000000';
     foreach ($order->items as $row) {
-        $line = $mul((string)$row->qty, (string)$row->unit_price, 8); // exact qty*unit_price
+        $line = $mul((string)$row->qty, (string)$row->unit_price, 8);
         $lines = $add($lines, $line, 8);
-        // stash per-row computed total for table rendering
         $row->__pdf_line_currency = $line;
     }
 
-    $subtotal   = $lines;                                 // items only
-    $discount   = (string) ($order->discount ?? 0);       // in order currency
-    $shipping   = (string) ($order->shipping ?? 0);       // in order currency
-
-    // Percent fees (match Filament field name)
+    $subtotal   = $lines;
+    $discount   = (string) ($order->discount ?? 0);
+    $shipping   = (string) ($order->shipping ?? 0);
     $feesPct    = (float) ($order->extra_fees_percent ?? 0);
     $fees       = '0';
     if ($feesPct > 0) {
         $base = $add($sub($subtotal, $discount, 8), $shipping, 8);
         $fees = $mul($base, (string)($feesPct/100), 8);
     }
-
-    // Flat extra fees (if you store any flat amount; keep as 0 if unused)
     $extraFees  = (string) ($order->extra_fees ?? 0);
 
     $grand      = $add(
@@ -150,6 +132,9 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
 .footer { position: fixed; left:0; right:0; bottom: -2px; height: 54px; border-top: 1px solid #e5e7eb; padding: 6px 12px 0 12px; font-size: 10px; color: #6b7280; }
 .footer .left { float: left; } .footer .right { float: right; text-align: right; }
 [dir="rtl"] .footer .left { float: right; text-align: right; } [dir="rtl"] .footer .right { float: left; text-align: left; }
+
+.item-note { color:#059669; margin-top:3px; }
+.invoice-note { margin-top:14px; padding:10px 12px; border:1px dashed #86efac; background:#f0fdf4; color:#065f46; border-radius:6px; }
 </style>
 </head>
 <body>
@@ -225,16 +210,20 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
       @php
         $p     = $row->product;
         $sku   = $p->sku ?? ($row->sku ?? '-');
-        $src   = $imgMap[$row->product_id] ?? null;   // provided by controller
+        $src   = $imgMap[$row->product_id] ?? null;
         $title = $pickTitle($p, $row->title ?? '');
-
-        $unit  = (string)$row->unit_price;                        // already in order currency
-        $line  = (string)($row->__pdf_line_currency ?? '0');      // qty*unit (currency)
+        $unit  = (string)$row->unit_price;
+        $line  = (string)($row->__pdf_line_currency ?? '0');
       @endphp
       <tr>
         <td style="text-align:center;">{{ $i + 1 }}</td>
         <td>@if($src)<img class="thumb" src="{{ $src }}" alt="{{ $title }}">@endif</td>
-        <td><div style="font-weight:600;margin-bottom:2px;">{{ $title }}</div></td>
+        <td>
+          <div style="font-weight:600;margin-bottom:2px;">{{ $title }}</div>
+          @if(!empty($row->note))
+            <div class="item-note">★ {{ $row->note }}</div>
+          @endif
+        </td>
         <td class="sku">{{ $sku ?: '—' }}</td>
         <td class="qty">{{ (int)$row->qty }}</td>
         <td class="right"><span>{{ $cur }} {{ $fmt2($unit) }}</span></td>
@@ -245,7 +234,6 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
 </table>
 
 @php
-    // Totals are already in the order currency
     $subtotalFx = $subtotal;
     $discountFx = $discount;
     $shippingFx = $shipping;
@@ -301,6 +289,13 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
   </table>
 </div>
 
+{{-- Invoice-level note --}}
+@if(!empty($order->invoice_note))
+  <div class="invoice-note">
+    {{ $order->invoice_note }}
+  </div>
+@endif
+
 @if($showCompanyBlock)
 <div class="footer">
   <div class="left"><strong>{{ $companyName }}</strong> — {{ $companyAddr1 }}, {{ $companyAddr2 }}</div>
@@ -308,7 +303,6 @@ th { background: #f8fafc; font-weight: 700; text-align: left; }
 </div>
 @endif
 
-{{-- mPDF page numbers --}}
 <script type="text/php">
 if (isset($pdf)) {
     $font = $fontMetrics->getFont("DejaVu Sans", "normal");
