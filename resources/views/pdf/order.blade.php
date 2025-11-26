@@ -1,322 +1,533 @@
-{{-- resources/views/pdf/order.blade.php --}}
 @php
-    use Illuminate\Support\Str;
-
-    $mul = fn($a,$b,$s=8) => bcmul((string)$a,(string)$b,$s);
-    $add = fn($a,$b,$s=8) => bcadd((string)$a,(string)$b,$s);
-    $sub = fn($a,$b,$s=8) => bcsub((string)$a,(string)$b,$s);
-
-    $fmt2   = fn($v) => number_format((float)$v, 2, '.', ',');
-    $fmtPct = fn($v) => rtrim(rtrim(number_format((float)$v, 2, '.', ','), '0'), '.');
+    // --- Math & Formatting Helpers ---
+    $mul = fn($a,$b,$s=4) => bcmul((string)$a,(string)$b,$s);
+    $add = fn($a,$b,$s=4) => bcadd((string)$a,(string)$b,$s);
+    $sub = fn($a,$b,$s=4) => bcsub((string)$a,(string)$b,$s);
+    $fmt = fn($v) => number_format((float)$v, 2, '.', ',');
 
     $locale = app()->getLocale();
     $isRtl  = ($locale === 'ar');
+    $dir    = $isRtl ? 'rtl' : 'ltr';
 
-    $companyName  = $company ?? config('app.name', 'Techno Lock Keys');
-    $companyAddr1 = $company_addr1 ?? 'Industrial Area 5, Maleha Street';
-    $companyAddr2 = $company_addr2 ?? 'United Arab Emirates – Sharjah';
-    $companyPhone = $company_phone ?? '(+971) 50 442 9045';
-    $companyEmail = $company_email ?? 'info@tlkeys.com';
-    $companyWeb   = $company_web   ?? 'www.tlkeys.com';
+    // --- Simple translations (EN / AR, default EN) ---
+    if ($isRtl) {
+        $t = [
+            'customer_details' => 'تفاصيل العميل',
+            'name'             => 'الاسم',
+            'phone'            => 'الهاتف',
+            'email'            => 'البريد الإلكتروني',
+            'country'          => 'الدولة',
+            'address'          => 'العنوان',
+            'sku'              => 'الرمز',
+            'image'            => 'الصورة',
+            'product'          => 'المنتج',
+            'price'            => 'السعر',
+            'qty'              => 'الكمية',
+            'total'            => 'الإجمالي',
+            'order_number'     => 'رقم الطلب',
+            'order_date'       => 'تاريخ الطلب',
+            'customer_id'      => 'رقم العميل',
+            'order_summary'    => 'ملخص الطلب',
+            'subtotal'         => 'الإجمالي الفرعي',
+            'shipping'         => 'الشحن',
+            'discount'         => 'الخصم',
+            'service_fees'     => 'رسوم الخدمة',
+            'note'             => 'ملاحظة',
+            'paid'             => 'مدفوع',
+            'unpaid'           => 'غير مدفوع',
+        ];
+    } else {
+        $t = [
+            'customer_details' => 'Customer Details',
+            'name'             => 'Name',
+            'phone'            => 'Phone',
+            'email'            => 'Email',
+            'country'          => 'Country',
+            'address'          => 'Address',
+            'sku'              => 'SKU',
+            'image'            => 'Image',
+            'product'          => 'Product',
+            'price'            => 'Price',
+            'qty'              => 'Quantity',
+            'total'            => 'Total',
+            'order_number'     => 'Order Number',
+            'order_date'       => 'Order Date',
+            'customer_id'      => 'Customer ID',
+            'order_summary'    => 'Order Summary',
+            'subtotal'         => 'Sub total',
+            'shipping'         => 'Shipping',
+            'discount'         => 'Discount',
+            'service_fees'     => 'Service Fees',
+            'note'             => 'Note',
+            'paid'             => 'PAID',
+            'unpaid'           => 'UNPAID',
+        ];
+    }
 
-    $branchCode   = $order->branch?->code ?? null;
-    $showCompanyBlock = ($branchCode === 'AE');
+    // --- Configuration ---
+    $companyName  = config('app.name', 'Techno Lock Keys');
+    $companyAddress = [
+        'Industrial Area 5, Maleha Street',
+        'United Arab Emirates – Sharjah',
+        '(+971) 50 442 9045',
+        'info@tlkeys.com',
+    ];
 
-    $docCode    = $order->code ?? ('TLO' . str_pad($order->id, 6, '0', STR_PAD_LEFT));
-    $docDate    = $order->created_at?->format('d.m.Y H:i');
-    $customerId = $order->customer?->code ?? ($order->customer_id ? ('TLK' . $order->customer_id) : '-');
+    $docCode    = $order->code ?? 'ORD-'.$order->id;
+    $docDate    = $order->created_at?->format('d-m-Y') ?? date('d-m-Y');
+    $customerId = $order->customer_id
+        ? 'TLKC'.str_pad($order->customer_id, 7, '0', STR_PAD_LEFT)
+        : '-';
+    $cur        = $order->currency ?: 'USD';
 
-    $cur = $order->currency ?: 'USD';
-    $brandColor = '#2D83B0';
+    // --- Customer Data ---
+    $cust   = $order->customer;
+    $cName  = $cust->name ?? $order->customer_name_manual ?? 'Guest';
 
-    $customer   = $order->customer;
-    $custName   = $customer->name ?? '-';
-    $custEmail  = $customer->email ?? '';
-    $custPhone  = $customer->phone ?? '';
-    $custAddr   = trim(($customer->address ?? ''));
-    $custCity   = trim(($customer->city ?? ''));
-    $custCountry= trim(($customer->country ?? ''));
-    $custPostal = trim(($customer->postal_code ?? ''));
-    $hasCustomerData = $customer && (
-        ($custName && $custName !== '-') ||
-        $custPhone || $custEmail || $custAddr || $custCity || $custCountry || $custPostal
-    );
+    $addrParts = [];
+    if (!empty($cust->address)) $addrParts[] = $cust->address;
+    if (!empty($cust->city))    $addrParts[] = $cust->city;
+    if (!empty($cust->country)) $addrParts[] = $cust->country;
+    $cAddress = implode(', ', $addrParts);
 
-    $status       = strtolower((string)$order->payment_status);
-    $statusPretty = str_replace('_', ' ', $status);
-
-    $logo = $logoPath ?? null;
-
-    $pickTitle = function ($p, $fallback = '') use ($locale) {
-        if (is_array($p?->title ?? null)) {
-            return $p->title[$locale] ?? $p->title['en'] ?? reset($p->title) ?? $fallback;
-        }
-        return $p->title ?? $fallback;
-    };
-
-    $lines = '0.00000000';
+    // --- Totals Calculation ---
+    $linesTotal = '0';
     foreach ($order->items as $row) {
-        $line = $mul((string)$row->qty, (string)$row->unit_price, 8);
-        $lines = $add($lines, $line, 8);
-        $row->__pdf_line_currency = $line;
+        $total = $mul((string)$row->qty, (string)$row->unit_price, 4);
+        $linesTotal = $add($linesTotal, $total, 4);
+        $row->__line_total = $total;
     }
 
-    $subtotal   = $lines;
-    $discount   = (string) ($order->discount ?? 0);
-    $shipping   = (string) ($order->shipping ?? 0);
-    $feesPct    = (float) ($order->extra_fees_percent ?? 0);
-    $fees       = '0';
+    $subtotal = $linesTotal;
+    $discount = (string)($order->discount ?? 0);
+    $shipping = (string)($order->shipping ?? 0);
+    $feesPct  = (float)($order->extra_fees_percent ?? 0);
+
+    $feesVal = '0';
     if ($feesPct > 0) {
-        $base = $add($sub($subtotal, $discount, 8), $shipping, 8);
-        $fees = $mul($base, (string)($feesPct/100), 8);
+        $base    = $add($sub($subtotal, $discount, 4), $shipping, 4);
+        $feesVal = $mul($base, (string)($feesPct / 100), 4);
     }
-    $extraFees  = (string) ($order->extra_fees ?? 0);
 
-    $grand      = $add(
-                    $add(
-                        $sub($subtotal, $discount, 8),
-                        $shipping, 8
-                    ),
-                    $add($fees, $extraFees, 8),
-                    8
-                  );
+    $grandTotal = $add($add($sub($subtotal, $discount, 4), $shipping, 4), $feesVal, 4);
+    $paidAmount = (string)($order->paid_amount ?? 0);
 
-    $paid       = (string) ($order->paid_amount ?? 0);
-    $due        = bccomp($grand, $paid, 8) > 0 ? $sub($grand, $paid, 8) : '0';
+    // --- Status Stamp ---
+    $isPaid      = $order->payment_status === 'paid';
+    $stampText   = $isPaid ? $t['paid'] : $t['unpaid'];
+    $stampColor  = $isPaid ? '#22c55e' : '#ef4444';
+    $borderColor = $isPaid ? '#22c55e' : '#ef4444';
+
+    $shippingLabel = ($isRtl ? $t['shipping'].' ' : $t['shipping'].' ')
+        .strtoupper($order->shipping_method ?? '');
 @endphp
 
-<!doctype html>
-<html lang="{{ $locale }}" dir="{{ $isRtl ? 'rtl' : 'ltr' }}">
+<!DOCTYPE html>
+<html lang="{{ $locale }}" dir="{{ $dir }}">
 <head>
-<meta charset="utf-8">
-<title>{{ $companyName }} - {{ __('Invoice') }} {{ $docCode }}</title>
-<style>
-@if ($isRtl) * { font-family: Amiri, "DejaVu Sans", sans-serif; } @else * { font-family: "DejaVu Sans", sans-serif; } @endif
-.bidi { unicode-bidi: plaintext; }
+    <meta charset="utf-8">
+    <title>{{ $docCode }}</title>
 
-@if($showCompanyBlock) @page { margin: 28px 28px 70px 28px; }
-@else                  @page { margin: 28px; } @endif
+    {{-- Bootstrap CDN (optional for DOMPDF) --}}
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    >
 
-body { font-size: 13px; color: #111; }
-.brand { color: {{ $brandColor }}; }
-.muted { color: #666; }
+    <style>
+        @page {
+            margin-top: 1cm;
+            margin-bottom: 2cm;
+            margin-left: 0.8cm;
+            margin-right: 0.8cm;
+            footer: page-footer;
+        }
 
-.header { width: 100%; }
-.header::after { content:""; display:block; clear: both; }
-.header .left  { float: left;  width: 60%; }
-.header .right { float: right; width: 40%; text-align: right; }
-[dir="rtl"] .header .left  { float: right; text-align: right; }
-[dir="rtl"] .header .right { float: left;  text-align: left; }
+        body {
+            font-family: 'DejaVu Sans', sans-serif;
+            font-size: 10pt;
+            color: #333333;
+            line-height: 1.4;
+        }
 
-.logo { height: 50px; display:block; margin-bottom: 6px; }
-.rule { height: 2px; background: {{ $brandColor }}; opacity: .15; margin: 8px 0 14px; }
+        table { width: 100%; border-collapse: collapse; border-spacing: 0; }
+        td, th { vertical-align: top; }
 
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px 10px; border: 1px solid #e5e7eb; vertical-align: middle; }
-th { background: #f8fafc; font-weight: 700; text-align: left; }
-[dir="rtl"] th, [dir="rtl"] td { text-align: right; }
-.sku { font-weight: 700; white-space: nowrap; }
-.qty { text-align: center; width: 48px; }
-.thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: inline-block; vertical-align: middle; }
+        .nowrap { white-space: nowrap; }
 
-.badge { display:inline-block; padding:3px 12px; border-radius:999px; background:#eef2ff; color:#374151; border:1px solid #e5e7eb; font-size:12px; }
+        /* Header */
+        .header-table { margin-bottom: 10px; }
+        .company-name {
+            font-size: 12pt;
+            font-weight: bold;
+            margin-bottom: 4px;
+        }
+        .company-line {
+            font-size: 9pt;
+            color: #555555;
+        }
+        .logo-img {
+            width: 140px;
+            height: auto !important;
+            display: block;
+            object-fit: contain;
+            margin-left: auto;
+        }
+        .order-meta {
+            font-size: 8.5pt;
+            color: #444444;
+            margin-top: 6px;
+            text-align: right;
+        }
+        .order-meta .label { font-weight: bold; }
 
-.totalsbox { width: 380px; margin-left: auto; border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 6px; }
-.totalsbox td { padding: 9px 12px; border-bottom: 1px solid #eef2f7; }
-.totalsbox tr:last-child td { border-bottom: 0; }
-.totalsbox .val { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-[dir="rtl"] .totalsbox .val { text-align: left; }
-.totalsbox .grand td { background: #fee2e2; }
-.totalsbox .grand .val { color: #dc2626; font-weight: 800; font-size: 14px; }
+        /* Section titles */
+        .section-title {
+            font-size: 10pt;
+            font-weight: bold;
+            color: #333333;
+            margin: 18px 0 6px;
+        }
+        .section-title-line {
+            border-bottom: 1px solid #cccccc;
+            margin-bottom: 8px;
+        }
 
-.footer { position: fixed; left:0; right:0; bottom: -2px; height: 54px; border-top: 1px solid #e5e7eb; padding: 6px 12px 0 12px; font-size: 10px; color: #6b7280; }
-.footer .left { float: left; } .footer .right { float: right; text-align: right; }
-[dir="rtl"] .footer .left { float: right; text-align: right; } [dir="rtl"] .footer .right { float: left; text-align: left; }
+        /* Customer details */
+        .cust-label { font-weight: bold; color: #333333; }
+        .cust-value { color: #444444; }
 
-.item-note { color:#059669; margin-top:3px; }
-.invoice-note { margin-top:14px; padding:10px 12px; border:1px dashed #86efac; background:#f0fdf4; color:#065f46; border-radius:6px; }
-</style>
+        /* Items table (full bordered) */
+        .items-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            border: 1px solid #cfcfcf;
+        }
+        .items-table thead th {
+            background-color: #343A40;
+            color: #ffffff;
+            font-size: 9pt;
+            padding: 8px 6px;
+            border: 1px solid #343A40;
+        }
+        .items-table tbody td {
+            font-size: 9pt;
+            padding: 8px 6px;
+            border-left: 1px solid #c1c1c1;
+            border-right: 1px solid #c1c1c1;
+            border-bottom: 2px solid #c1c1c1!important; /* stronger bottom border between items */
+            border-top: 2px solid #c1c1c1!important;
+        }
+        .items-table tbody tr:nth-child(even) {
+            background-color: #fafafa;
+        }
+
+        .text-center { text-align: center; }
+        .text-right  { text-align: right; }
+
+        /* Bigger product image */
+        .thumb {
+            width: 50px;
+            height: 50px;
+            object-fit: contain;
+            border: 1px solid #dddddd;
+            border-radius: 3px;
+            margin: 0 auto;
+            background-color: #ffffff;
+        }
+
+        /* Smaller product name font + fixed height */
+        .product-name {
+            font-weight: bold;
+            color: #333333;
+            font-size: 8.5pt;
+            line-height: 1.3;
+            display: block;
+            min-height: 28px;
+        }
+
+        .sku-badge {
+            display: inline-block;
+            font-family: monospace;
+            background: #f3f3f3;
+            border: 1px solid #e0e0e0;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 8pt;
+            color: #444444;
+            margin-right: 4px;
+        }
+        .item-note {
+            color: #198754;
+            font-size: 8pt;
+        }
+
+        /* Totals */
+        .totals-wrapper { margin-top: 10px; }
+
+        .totals-table {
+            border-collapse: collapse;
+            border: 1px solid #cfcfcf;
+            font-size: 9pt;
+            background: #ffffff;
+            width: 260px;
+        }
+        .totals-table thead th {
+            background-color: #343A40;
+            color: #ffffff;
+            font-size: 9pt;
+            padding: 6px 8px;
+            text-align: left;
+            border-bottom: 1px solid #343A40;
+        }
+        .totals-table tbody td {
+            padding: 6px 8px;
+            border-top: 1px solid #e2e2e2;
+        }
+        .totals-label { text-align: left; }
+        .totals-value {
+            text-align: right;
+        }
+        .totals-row-gray td { background-color: #f7f7f7; }
+        .totals-row-total td {
+            background-color: #f1f1f1;
+            font-weight: bold;
+        }
+        .totals-row-total .totals-value { color: #dc2626; }
+        .totals-accent {
+            color: #dc2626;
+            font-weight: bold;
+        }
+
+        /* Stamp (under order summary, moved slightly left) */
+        .stamp {
+            display: inline-block;
+            border: 3px solid {{ $borderColor }};
+            color: {{ $stampColor }};
+            font-size: 15pt;
+            font-weight: bold;
+            text-transform: uppercase;
+            border-radius: 4px;
+            white-space: nowrap;
+            margin-top: 8px;
+            width: 90px;
+            float:right;
+        }
+
+        /* Note section */
+        .note-label {
+            font-weight: bold;
+            margin-top: 20px;
+            margin-bottom: 4px;
+        }
+        .note-line {
+            border-top: 1px dotted #cccccc;
+            margin-bottom: 4px;
+        }
+        .note-content {
+            font-size: 9pt;
+            color: #555555;
+            margin-top: 4px;
+        }
+    </style>
 </head>
 <body>
+    {{-- Header --}}
+    <table class="header-table">
+        <tr>
+            <td width="60%">
+                <div class="company-name">Techno Lock Keys</div>
+                @foreach($companyAddress as $line)
+                    <div class="company-line">{{ $line }}</div>
+                @endforeach
+            </td>
+            <td width="40%" style="text-align:right;">
+                @if(!empty($logoPath))
+                    {{-- Use your storage/asset path or $logoPath --}}
+                    <img class="logo-img" src="https://dev-srv.tlkeys.com/storage/AAAA/techno-lock-desktop-logo.jpg" alt="Logo">
+                    {{-- <img src="{{ $logoPath }}" class="logo-img" alt="Logo"> --}}
+                @endif
 
-<div class="header">
-  <div class="left">
-    @if($showCompanyBlock)
-      @if($logo)
-         <img class="logo" src="{{ $logo }}" alt="Logo">
-      @endif
-      <div class="muted">
-        {{ $companyAddr1 }} <br>
-        {{ $companyAddr2 }} <br>
-        {{ __('Tel') }}: {{ $companyPhone }} <br>
-        {{ __('Email') }}: {{ $companyEmail }}
-      </div>
-    @endif
-  </div>
-  <div class="right">
-    <div><b>{{ __('Date') }}: {{ $docDate }}</b></div>
-    <div><b>{{ __('Order Number') }}: #{{ $docCode }}</b></div>
-    <div><b>{{ __('Customer ID') }}: {{ $customerId }}</b></div>
-    @if($statusPretty)
-      <div class="badge" style="margin-top:6px;">{{ __($statusPretty) }}</div>
-    @endif
-  </div>
-</div>
-
-<div class="rule"></div>
-
-@if($hasCustomerData)
-<table style="margin-bottom:12px;">
-  <tr><td style="border:1px solid #e5e7eb;">
-    <span class="brand">{{ __('Customer Information') }}</span><br><br>
-    <table style="width:100%; border-collapse:separate;">
-      @if($custName && $custName !== '-')
-      <tr><td style="border:none; padding:0 6px 2px 0;"><strong>{{ __('Name') }}:</strong></td><td style="border:none; padding:0 0 2px 0;">{{ $custName }}</td></tr>
-      @endif
-      @if($custPhone)
-      <tr><td style="border:none; padding:0 6px 0 0;"><strong>{{ __('Phone') }}:</strong></td><td style="border:none; padding:0;">{{ $custPhone }}</td></tr>
-      @endif
-      @if($custEmail)
-      <tr><td style="border:none; padding:0 6px 0 0;"><strong>{{ __('Email') }}:</strong></td><td style="border:none; padding:0;">{{ $custEmail }}</td></tr>
-      @endif
-      @if($custAddr || $custCity || $custCountry || $custPostal)
-      <tr><td style="border:none; padding:0 6px 0 0;"><strong>{{ __('Address') }}:</strong></td>
-          <td style="border:none; padding:0;">
-            {{ $custAddr }}@if($custCity), {{ $custCity }}@endif
-            @if($custCountry), {{ $custCountry }}@endif
-            @if($custPostal), {{ $custPostal }}@endif
-          </td></tr>
-      @endif
+                <div class="order-meta">
+                    <div>
+                        <span class="label">{{ $t['order_number'] }}: </span>
+                        <span>#{{ $docCode }}</span>
+                    </div>
+                    <div>
+                        <span class="label">{{ $t['order_date'] }}: </span>
+                        <span>{{ $docDate }}</span>
+                    </div>
+                    <div>
+                        <span class="label">{{ $t['customer_id'] }}: </span>
+                        <span>{{ $customerId }}</span>
+                    </div>
+                </div>
+            </td>
+        </tr>
     </table>
-  </td></tr>
-</table>
-@endif
 
-<h4 class="brand" style="margin:10px 0 6px;">{{ __('Items') }}</h4>
-<table class="items">
-  <thead>
-    <tr>
-      <th style="width:32px;text-align:center;">#</th>
-      <th style="width:64px;">{{ __('Image') }}</th>
-      <th>{{ __('Product') }}</th>
-      <th class="sku">{{ __('SKU') }}</th>
-      <th class="qty">{{ __('Qty') }}</th>
-      <th class="right">{{ __('Unit Price') }}</th>
-      <th class="right">{{ __('Total') }}</th>
-    </tr>
-  </thead>
-  <tbody>
-    @foreach($order->items as $i => $row)
-      @php
-        $p     = $row->product;
-        $sku   = $p->sku ?? ($row->sku ?? '-');
-        $src   = $imgMap[$row->product_id] ?? null;
-        $title = $pickTitle($p, $row->title ?? '');
-        $unit  = (string)$row->unit_price;
-        $line  = (string)($row->__pdf_line_currency ?? '0');
-      @endphp
-      <tr>
-        <td style="text-align:center;">{{ $i + 1 }}</td>
-        <td>@if($src)<img class="thumb" src="{{ $src }}" alt="{{ $title }}">@endif</td>
-        <td>
-          <div style="font-weight:600;margin-bottom:2px;">{{ $title }}</div>
-          @if(!empty($row->note))
-            <div class="item-note">★ {{ $row->note }}</div>
-          @endif
-        </td>
-        <td class="sku">{{ $sku ?: '—' }}</td>
-        <td class="qty">{{ (int)$row->qty }}</td>
-        <td class="right"><span>{{ $cur }} {{ $fmt2($unit) }}</span></td>
-        <td class="right"><span>{{ $cur }} {{ $fmt2($line) }}</span></td>
-      </tr>
-    @endforeach
-  </tbody>
-</table>
+    {{-- Customer Details --}}
+    <div class="section-title">{{ $t['customer_details'] }}</div>
+    <div class="section-title-line"></div>
 
-@php
-    $subtotalFx = $subtotal;
-    $discountFx = $discount;
-    $shippingFx = $shipping;
-    $feesFx     = $fees;
-    $extraFx    = $extraFees;
-    $grandFx    = $grand;
-    $paidFx     = $paid;
-    $dueFx      = $due;
-@endphp
+    <table>
+        <tr>
+            <td width="15%" class="cust-label">{{ $t['name'] }}:</td>
+            <td width="85%" class="cust-value">{{ $cName }}</td>
+        </tr>
+        @if($cAddress)
+            <tr>
+                <td class="cust-label">{{ $t['address'] }}:</td>
+                <td class="cust-value">{{ $cAddress }}</td>
+            </tr>
+        @endif
+        @if(!empty($cust->country))
+            <tr>
+                <td class="cust-label">{{ $t['country'] }}:</td>
+                <td class="cust-value">{{ $cust->country }}</td>
+            </tr>
+        @endif
+        @if(!empty($cust->phone))
+            <tr>
+                <td class="cust-label">{{ $t['phone'] }}:</td>
+                <td class="cust-value">{{ $cust->phone }}</td>
+            </tr>
+        @endif
+        @if(!empty($cust->email))
+            <tr>
+                <td class="cust-label">{{ $t['email'] }}:</td>
+                <td class="cust-value">{{ $cust->email }}</td>
+            </tr>
+        @endif
+    </table>
 
-<div class="totalsbox">
-  <table>
-    <tr>
-      <td class="label">{{ __('Subtotal') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($subtotalFx) }}</span></td>
-    </tr>
-    @if(bccomp($discountFx,'0',8) > 0)
-    <tr>
-      <td class="label">{{ __('Discount') }}</td>
-      <td class="val">− <span class="bidi">{{ $cur }} {{ $fmt2($discountFx) }}</span></td>
-    </tr>
+    {{-- Items Table --}}
+    <div class="section-title" style="margin-top:10px;">&nbsp;</div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th width="5%"  class="text-center">#</th>
+                <th width="10%">{{ $t['sku'] }}</th>
+                <th width="10%" class="text-center">{{ $t['image'] }}</th>
+                <th width="35%">{{ $t['product'] }}</th>
+                <th width="15%" class="text-center">{{ $t['price'] }}</th>
+                <th width="10%" class="text-center">{{ $t['qty'] }}</th>
+                <th width="15%" class="text-right">{{ $t['total'] }}</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach($order->items as $idx => $row)
+            @php
+                $sku = $row->sku;
+                if (!$sku && $row->product) {
+                    $sku = $row->product->sku;
+                }
+
+                $name = $row->product_name;
+                if (!$name && $row->product) {
+                    $name = $row->product->title;
+                    if (is_array($name)) {
+                        $name = $name[$locale] ?? $name['en'] ?? reset($name);
+                    }
+                }
+
+                $img = $imgMap[$row->product_id] ?? null;
+            @endphp
+            <tr>
+                <td class="text-center" style="vertical-align: middle">{{ $idx + 1 }}</td>
+                <td style="vertical-align: middle">{{ $sku }}</td>
+                <td class="text-center" style="vertical-align: middle">
+                    @if($img)
+                        <img src="{{ $img }}" class="thumb" alt="">
+                    @endif
+                </td>
+                <td style="vertical-align: middle">
+                    <span class="product-name">{{ $name }}</span>
+                    @if($row->note)
+                        <div class="item-note">{{ $row->note }}</div>
+                    @endif
+                </td>
+                <td class="text-center" style="vertical-align: middle">
+                    <span class="nowrap">{{ $fmt($row->unit_price) }} {{ $cur }}</span>
+                </td>
+                <td class="text-center" style="vertical-align: middle">{{ (float)$row->qty }}</td>
+                <td class="text-right" style="vertical-align: middle">
+                    <span class="nowrap">{{ $fmt($row->__line_total) }} {{ $cur }}</span>
+                </td>
+            </tr>
+        @endforeach
+        </tbody>
+    </table>
+
+    {{-- Totals + Stamp (stamp under order summary) --}}
+    <table class="totals-wrapper">
+        <tr>
+            <td style="width:60%;"></td>
+            <td style="width:40%; text-align:right;">
+                <table class="totals-table">
+                    <thead>
+                        <tr>
+                            <th colspan="2">{{ $t['order_summary'] }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="totals-row-gray">
+                            <td class="totals-label">{{ $t['subtotal'] }}</td>
+                            <td class="totals-value">
+                                <span class="nowrap">{{ $fmt($subtotal) }} {{ $cur }}</span>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td class="totals-label">
+                                {{ trim($shippingLabel) ?: $t['shipping'] }}
+                            </td>
+                            <td class="totals-value">
+                                <span class="nowrap">{{ $fmt($shipping) }} {{ $cur }}</span>
+                            </td>
+                        </tr>
+
+                        @if((float)$discount > 0)
+                            <tr>
+                                <td class="totals-label">{{ $t['discount'] }}</td>
+                                <td class="totals-value">
+                                    <span class="nowrap">-{{ $fmt($discount) }} {{ $cur }}</span>
+                                </td>
+                            </tr>
+                        @endif
+
+                        @if($feesPct > 0)
+                            <tr>
+                                <td class="totals-label">{{ $t['service_fees'] }}</td>
+                                <td class="totals-value">
+                                    <span class="nowrap">
+                                        <span class="totals-accent">{{ $feesPct }}%</span>
+                                        ({{ $fmt($feesVal) }} {{ $cur }})
+                                    </span>
+                                </td>
+                            </tr>
+                        @endif
+
+                        <tr class="totals-row-total">
+                            <td class="totals-label">{{ $t['total'] }}</td>
+                            <td class="totals-value">
+                                <span class="nowrap">{{ $fmt($grandTotal) }} {{ $cur }}</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+            </td>
+        </tr>
+    </table>
+                    <div class="stamp">{{ $stampText }}</div>
+    {{-- Note --}}
+    <div class="note-label">{{ $t['note'] }}:</div>
+    <div class="note-line"></div>
+    @if($order->invoice_note)
+        <div class="note-content">{!! nl2br(e($order->invoice_note)) !!}</div>
     @endif
-    <tr>
-      <td class="label">{{ __('Shipping') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($shippingFx) }}</span></td>
-    </tr>
-    @if($feesPct > 0)
-    <tr>
-      <td class="label">{{ __('Service Fees (:pct%)', ['pct' => $fmtPct($feesPct)]) }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($feesFx) }}</span></td>
-    </tr>
-    @endif
-    @if(bccomp($extraFx,'0',8) > 0)
-    <tr>
-      <td class="label">{{ __('Extra Fees') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($extraFx) }}</span></td>
-    </tr>
-    @endif
-    <tr class="grand">
-      <td class="label">{{ __('Total') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($grandFx) }}</span></td>
-    </tr>
-    @if(bccomp($paidFx,'0',8) > 0)
-    <tr>
-      <td class="label">{{ __('Paid') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($paidFx) }}</span></td>
-    </tr>
-    <tr>
-      <td class="label">{{ __('Due') }}</td>
-      <td class="val"><span class="bidi">{{ $cur }} {{ $fmt2($dueFx) }}</span></td>
-    </tr>
-    @endif
-  </table>
-</div>
-
-{{-- Invoice-level note --}}
-@if(!empty($order->invoice_note))
-  <div class="invoice-note">
-    {{ $order->invoice_note }}
-  </div>
-@endif
-
-@if($showCompanyBlock)
-<div class="footer">
-  <div class="left"><strong>{{ $companyName }}</strong> — {{ $companyAddr1 }}, {{ $companyAddr2 }}</div>
-  <div class="right">{{ $companyWeb }} • {{ $companyEmail }} • {{ $companyPhone }}</div>
-</div>
-@endif
-
-<script type="text/php">
-if (isset($pdf)) {
-    $font = $fontMetrics->getFont("DejaVu Sans", "normal");
-    $size = 9;
-    $text = "{{ __('Page :n of :c') }}";
-    $text = str_replace([':n', ':c'], ['{PAGENO}', '{nbpg}'], $text);
-    $w = $fontMetrics->get_text_width($text, $font, $size);
-    $x = 297 - ($w / 2);
-    $y = {{ $showCompanyBlock ? 825 : 812 }};
-    $pdf->SetFont("DejaVu Sans", "", 9);
-    $pdf->text(28, $y, "{{ $docCode }}");
-    $pdf->text(530, $y, "{{ $docDate }}");
-    $pdf->text($x, $y, $text);
-}
-</script>
 </body>
 </html>

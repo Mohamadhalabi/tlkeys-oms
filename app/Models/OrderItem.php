@@ -1,16 +1,26 @@
 <?php
-// app/Models/OrderItem.php
+
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
 class OrderItem extends Model
 {
-    protected $fillable = ['order_id','product_id','qty','unit_price','line_total','sort'];
+    protected $fillable = [
+        'order_id',
+        'product_id',
+        'sku', // ✅ Added SKU here
+        'qty', 
+        'product_name',
+        'unit_price',
+        'line_total',
+        'sort',
+        'note',
+    ];
 
     protected $casts = [
-        'qty'        => 'decimal:3',   // was 2
-        'unit_price' => 'decimal:4',   // was 2  ✅ important
+        'qty'        => 'decimal:3', 
+        'unit_price' => 'decimal:4',
         'line_total' => 'decimal:2',
     ];
 
@@ -28,5 +38,5 @@ class OrderItem extends Model
     }
 
     public function order()   { return $this->belongsTo(Order::class); }
-    public function product() { return $this->belongsTo(Product::class); } // ✅ needed for PDF
+    public function product() { return $this->belongsTo(Product::class); }
 }

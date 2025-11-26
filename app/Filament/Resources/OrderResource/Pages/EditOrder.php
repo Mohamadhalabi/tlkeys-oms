@@ -18,11 +18,8 @@ class EditOrder extends EditRecord
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
         unset($data['items']);
-
         $data = $this->normalizeOrderNumbers($data);
-
         $record->update($data);
-
         $this->applyWalletSideEffects($record->refresh());
         return $record;
     }
@@ -59,49 +56,41 @@ class EditOrder extends EditRecord
         return $data;
     }
 
-    /**
-     * Build repeater rows for the form. Also:
-     *  - Order items by 'sort'
-     *  - Eager-load products with only existing columns
-     */
+    // Pre-calculate data for the form fill
     protected function mutateFormDataBeforeFill(array $data): array
     {
         /** @var \App\Models\Order $order */
         $order = $this->getRecord();
-
-        // Ensure items are ordered by 'sort' and product is eager-loaded safely
+        
         $order->loadMissing([
             'items' => fn ($q) => $q->orderBy('sort'),
             'items.product' => fn ($q) => $q->select('id', 'sku', 'image', 'price', 'sale_price'),
         ]);
 
-        $rows = [];
-        $i    = 1;
-        $rate = (float) ($order->exchange_rate ?: 1);
+        $items = [];
+        $branchId = (int) $order->branch_id;
+        $customerId = (int) $order->customer_id;
 
         foreach ($order->items as $item) {
-            $p = $item->product;
+            $itemData = $item->toArray();
+            
+            // Important: Set is_custom for the Toggle to read
+            $itemData['is_custom'] = empty($item->product_id);
 
-            // Base unit in USD (keep same logic but guard null product)
-            $baseUsd = $rate > 0
-                ? round(((float) $item->unit_price) / $rate, 6)
-                : (float) ($p?->sale_price ?? $p?->price ?? 0);
+            // DO NOT OVERRIDE SKU HERE. Let the DB value load naturally.
 
-            $rows[] = [
-                'row_index'      => $i++,
-                'product_id'     => $item->product_id,
-                'qty'            => (float) $item->qty,
-                'unit_price'     => (float) $item->unit_price,
-                'line_total'     => (float) $item->line_total,
-                'sku'            => $p?->sku,
-                'thumb'          => \App\Filament\Resources\OrderResource::productThumbUrl($p?->image),
-                'base_unit_usd'  => $baseUsd,
-                'stock_info'     => null,
-                'note'           => $item->note, // keep per-item note
-            ];
+            // Calculate Stock HTML
+            $html = '';
+            if ($item->product_id && $branchId) {
+                $html = OrderResource::generateItemExtrasHtml($item->product_id, $branchId, $customerId);
+            }
+            
+            $itemData['extra_info_html'] = $html;
+            $items[] = $itemData;
         }
 
-        $data['items'] = $rows;
+        $data['items'] = $items;
+
         return $data;
     }
 
@@ -198,7 +187,6 @@ class EditOrder extends EditRecord
                     }
 
                     Notification::make()->title(__('Converted to Order'))->success()->send();
-
                     $this->fillForm();
                 }),
 
