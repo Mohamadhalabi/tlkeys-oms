@@ -80,6 +80,9 @@
         : '-';
     $cur        = $order->currency ?: 'USD';
 
+    // Branch code (used to decide whether to show TLKeys header/logo)
+    $branchCode = $order->branch->code ?? $order->branch_code ?? null;
+
     // --- Customer Data ---
     $cust   = $order->customer;
     $cName  = $cust->name ?? $order->customer_name_manual ?? 'Guest';
@@ -171,7 +174,14 @@
             height: auto !important;
             display: block;
             object-fit: contain;
+        }
+        .logo-img-ltr {
             margin-left: auto;
+            margin-right: 0;
+        }
+        .logo-img-rtl {
+            margin-right: auto;
+            margin-left: 0;
         }
         .order-meta {
             font-size: 8.5pt;
@@ -216,8 +226,8 @@
             padding: 8px 6px;
             border-left: 1px solid #c1c1c1;
             border-right: 1px solid #c1c1c1;
-            border-bottom: 2px solid #c1c1c1!important; /* stronger bottom border between items */
-            border-top: 2px solid #c1c1c1!important;
+            border-bottom: 2px solid #c1c1c1 !important;
+            border-top: 2px solid #c1c1c1 !important;
         }
         .items-table tbody tr:nth-child(even) {
             background-color: #fafafa;
@@ -286,9 +296,7 @@
             border-top: 1px solid #e2e2e2;
         }
         .totals-label { text-align: left; }
-        .totals-value {
-            text-align: right;
-        }
+        .totals-value { text-align: right; }
         .totals-row-gray td { background-color: #f7f7f7; }
         .totals-row-total td {
             background-color: #f1f1f1;
@@ -300,9 +308,9 @@
             font-weight: bold;
         }
 
-        /* Stamp (under order summary, moved slightly left) */
+        /* Stamp (under order summary, centered; width per language) */
         .stamp {
-            display: inline-block;
+            display: block;
             border: 3px solid {{ $borderColor }};
             color: {{ $stampColor }};
             font-size: 15pt;
@@ -311,10 +319,10 @@
             border-radius: 4px;
             white-space: nowrap;
             margin-top: 8px;
-            width: 90px;
-            float:right;
+            padding: 6px 14px;
+            text-align: center;
+            width:120px;
         }
-
         /* Note section */
         .note-label {
             font-weight: bold;
@@ -337,16 +345,22 @@
     <table class="header-table">
         <tr>
             <td width="60%">
-                <div class="company-name">Techno Lock Keys</div>
-                @foreach($companyAddress as $line)
-                    <div class="company-line">{{ $line }}</div>
-                @endforeach
+                @if($branchCode === 'AE')
+                    <div class="company-name">Techno Lock Keys</div>
+                    @foreach($companyAddress as $line)
+                        <div class="company-line">{{ $line }}</div>
+                    @endforeach
+                @endif
             </td>
             <td width="40%" style="text-align:right;">
-                @if(!empty($logoPath))
-                    {{-- Use your storage/asset path or $logoPath --}}
-                    <img class="logo-img" src="https://dev-srv.tlkeys.com/storage/AAAA/techno-lock-desktop-logo.jpg" alt="Logo">
-                    {{-- <img src="{{ $logoPath }}" class="logo-img" alt="Logo"> --}}
+                @if($branchCode === 'AE' && !empty($logoPath))
+                    {{-- Logo on the right for EN, on the LEFT for AR --}}
+                    <img
+                        class="logo-img {{ $isRtl ? 'logo-img-rtl' : 'logo-img-ltr' }}"
+                        src="https://dev-srv.tlkeys.com/storage/AAAA/techno-lock-desktop-logo.jpg"
+                        alt="Logo"
+                    >
+                    {{-- Or use storage path: <img src="{{ $logoPath }}" class="logo-img {{ $isRtl ? 'logo-img-rtl' : 'logo-img-ltr' }}" alt="Logo"> --}}
                 @endif
 
                 <div class="order-meta">
@@ -443,7 +457,7 @@
                         <img src="{{ $img }}" class="thumb" alt="">
                     @endif
                 </td>
-                <td style="">
+                <td>
                     <span class="product-name">{{ $name }}</span>
                     @if($row->note)
                         <div class="item-note">{{ $row->note }}</div>
@@ -461,7 +475,7 @@
         </tbody>
     </table>
 
-    {{-- Totals + Stamp (stamp under order summary) --}}
+    {{-- Totals + centered stamp under the table --}}
     <table class="totals-wrapper">
         <tr>
             <td style="width:60%;"></td>
@@ -519,10 +533,11 @@
                     </tbody>
                 </table>
 
+                {{-- centered stamp just under the totals table --}}
             </td>
         </tr>
     </table>
-                    <div class="stamp">{{ $stampText }}</div>
+                <div class="stamp">{{ $stampText }}</div>
     {{-- Note --}}
     <div class="note-label">{{ $t['note'] }}:</div>
     <div class="note-line"></div>

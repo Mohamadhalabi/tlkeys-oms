@@ -80,7 +80,7 @@ class CustomerResource extends Resource
                 Tables\Columns\TextColumn::make('phone')->label(__('Phone'))->searchable(),
                 Tables\Columns\TextColumn::make('wallet_balance')->label(__('Wallet balance'))->numeric()->sortable(),
 
-                TextColumn::make('seller.name')
+                Tables\Columns\TextColumn::make('seller.name')
                     ->label('Created by')
                     ->placeholder('—')
                     ->sortable()
