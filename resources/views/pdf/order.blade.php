@@ -443,7 +443,7 @@
                         <img src="{{ $img }}" class="thumb" alt="">
                     @endif
                 </td>
-                <td style="vertical-align: middle">
+                <td style="">
                     <span class="product-name">{{ $name }}</span>
                     @if($row->note)
                         <div class="item-note">{{ $row->note }}</div>
