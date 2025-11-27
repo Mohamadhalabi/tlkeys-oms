@@ -470,16 +470,40 @@ class OrderResource extends \Filament\Resources\Resource
 
                             TextInput::make('exchange_rate')->numeric()->default(1.0)->disabled()->dehydrated()->columnSpan(8),
                             TextInput::make('subtotal')->numeric()->readOnly()->default(0)->columnSpan(6),
-                            TextInput::make('discount')->numeric()->default(0)->live(onBlur:true)->afterStateUpdated(fn($g, Set $s)=>static::recomputeTotals($g,$s))->columnSpan(6),
-                            TextInput::make('shipping')->numeric()->default(0)->live(onBlur:true)->afterStateUpdated(fn($g, Set $s)=>static::recomputeTotals($g,$s))->columnSpan(6),
-                            TextInput::make('extra_fees_percent')->numeric()->default(0)->live(onBlur:true)->afterStateUpdated(fn($g, Set $s)=>static::recomputeTotals($g,$s))->columnSpan(6),
-                            
+                            TextInput::make('discount')
+                                ->numeric()
+                                ->default(0)
+                                ->live(onBlur: true)
+                                // CHANGE THIS LINE: Type hint Get and Set explicitly
+                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->columnSpan(6),
+
+                            TextInput::make('shipping')
+                                ->numeric()
+                                ->default(0)
+                                ->live(onBlur: true)
+                                // CHANGE THIS LINE
+                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->columnSpan(6),
+
+                            TextInput::make('extra_fees_percent') // <--- Was 'extra_fees', change to 'extra_fees_percent'
+                                ->label('Extra Fees (%)')
+                                ->numeric()
+                                ->default(0)
+                                ->live(onBlur: true)
+                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->columnSpan(6),                         
                             TextInput::make('paid_amount')
                                 ->numeric()
                                 ->default(0)
                                 ->visible(fn($get) => $get('type') === 'order' && $get('payment_status') === 'partial')
                                 ->columnSpan(12),
-                                
+                         // ADD THIS HIDDEN FIELD
+                            TextInput::make('extra_fees')
+                                ->hidden()
+                                ->dehydrated()
+                                ->numeric()
+                                ->default(0),       
                             TextInput::make('total')->numeric()->readOnly()->default(0)->columnSpan(12),
                         ]),
                     ])
@@ -536,23 +560,32 @@ class OrderResource extends \Filament\Resources\Resource
         $items = $calledFromItem ? ($get('../../items') ?? []) : ($get('items') ?? []);
         $items = array_values(array_filter($items, fn ($r) => is_array($r)));
         $subtotal = 0.0;
+        
         foreach ($items as $row) {
             $subtotal += ((float)($row['qty']??0) * (float)($row['unit_price']??0));
         }
+        
         $discount = (float) ($get('discount') ?? 0);
         $shipping = (float) ($get('shipping') ?? 0);
-        $feesPct  = (float) ($get('extra_fees_percent') ?? 0);
+        
+        // FIX HERE: Get the value from 'extra_fees_percent'
+        $feesPct  = (float) ($get('extra_fees_percent') ?? 0); 
+        
+        // Calculate the absolute amount
         $fees     = $subtotal * ($feesPct / 100.0);
+        
         $total    = max(0, $subtotal - $discount + $shipping + $fees);
+        
         if ($calledFromItem) {
             $set('../../subtotal', round($subtotal, 2));
             $set('../../total', round($total, 2));
+            $set('../../extra_fees', round($fees, 2)); // Save absolute amount to hidden field
         } else {
             $set('subtotal', round($subtotal, 2));
             $set('total', round($total, 2));
+            $set('extra_fees', round($fees, 2)); // Save absolute amount to hidden field
         }
     }
-
 public static function table(Table $table): Table
     {
         return $table

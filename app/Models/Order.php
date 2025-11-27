@@ -12,21 +12,24 @@ class Order extends Model
         'branch_id', 'customer_id', 'seller_id',
         'type', 'status', 'payment_status', 'paid_amount',
         'subtotal', 'discount', 'shipping', 'total',
-        'currency', 'exchange_rate', 'extra_fees', 'extra_fees_local',
-        'invoice_note', // ✅ THIS MUST BE HERE
-    ];
+        'currency', 'exchange_rate', 
+        'extra_fees',         // The calculated amount (e.g., $10)
+        'extra_fees_local',
+        'extra_fees_percent',
+        'invoice_note',    ];
 
     protected $casts = [
-        'subtotal'      => 'decimal:2',
-        'discount'      => 'decimal:2',
-        'shipping'      => 'decimal:2',
-        'total'         => 'decimal:2',
-        'exchange_rate' => 'decimal:6',
-        'paid_amount'   => 'decimal:2',
-        'stock_state'   => 'array',
-        'extra_fees'        => 'decimal:4',
-        'extra_fees_local'  => 'decimal:4',
-    ];
+            'subtotal'           => 'decimal:2',
+            'discount'           => 'decimal:2',
+            'shipping'           => 'decimal:2',
+            'total'              => 'decimal:2',
+            'exchange_rate'      => 'decimal:6',
+            'paid_amount'        => 'decimal:2',
+            'stock_state'        => 'array',
+            'extra_fees'         => 'decimal:2', // changed to 2 decimals for currency consistency
+            'extra_fees_percent' => 'decimal:2', // <--- ADD THIS
+            'extra_fees_local'   => 'decimal:4',    
+        ];
 
     protected static function booted(): void
     {
