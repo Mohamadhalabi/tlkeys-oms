@@ -7,6 +7,7 @@ use App\Models\Order;
 use Filament\Notifications\Notification;
 use Filament\Notifications\Actions\Action as NotificationAction;
 use Filament\Resources\Pages\CreateRecord;
+use Filament\Actions;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +15,28 @@ use Illuminate\Support\Facades\DB;
 class CreateOrder extends CreateRecord
 {
     protected static string $resource = OrderResource::class;
+
+    // Modification 2: Only show one "Save" button
+    protected function getFormActions(): array
+    {
+        return [
+            $this->getCreateFormAction(),
+            $this->getCancelFormAction(),
+        ];
+    }
+
+    protected function getCreateFormAction(): Actions\Action
+    {
+        return parent::getCreateFormAction()
+            ->label('Save')
+            ->icon('heroicon-o-check');
+    }
+
+    protected function getCreateAnotherFormAction(): Actions\Action
+    {
+        // Disable create another by returning a hidden action or just not using it in getFormActions
+        return parent::getCreateAnotherFormAction()->hidden();
+    }
 
     protected function mutateFormDataBeforeCreate(array $data): array
     {

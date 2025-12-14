@@ -56,7 +56,6 @@ class EditOrder extends EditRecord
         return $data;
     }
 
-    // Pre-calculate data for the form fill
     protected function mutateFormDataBeforeFill(array $data): array
     {
         /** @var \App\Models\Order $order */
@@ -64,28 +63,16 @@ class EditOrder extends EditRecord
         
         $order->loadMissing([
             'items' => fn ($q) => $q->orderBy('sort'),
-            'items.product' => fn ($q) => $q->select('id', 'sku', 'image', 'price', 'sale_price'),
+            'items.product' => fn ($q) => $q->select('id', 'sku', 'image', 'price', 'sale_price', 'title'),
         ]);
 
         $items = [];
-        $branchId = (int) $order->branch_id;
-        $customerId = (int) $order->customer_id;
 
         foreach ($order->items as $item) {
             $itemData = $item->toArray();
-            
-            // Important: Set is_custom for the Toggle to read
             $itemData['is_custom'] = empty($item->product_id);
-
-            // DO NOT OVERRIDE SKU HERE. Let the DB value load naturally.
-
-            // Calculate Stock HTML
-            $html = '';
-            if ($item->product_id && $branchId) {
-                $html = OrderResource::generateItemExtrasHtml($item->product_id, $branchId, $customerId);
-            }
-            
-            $itemData['extra_info_html'] = $html;
+            // No HTML generation needed here anymore.
+            // The placeholder in the form schema will generate it on render.
             $items[] = $itemData;
         }
 

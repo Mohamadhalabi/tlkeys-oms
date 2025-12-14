@@ -9,6 +9,7 @@ use App\Models\CurrencyRate;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\OrderItem;
+use App\Models\ProductBranch;
 use Carbon\Carbon;
 use Filament\Forms\Form;
 use Filament\Forms\Get;
@@ -25,15 +26,13 @@ use Filament\Forms\Components\Actions;
 use Filament\Forms\Components\Actions\Action;
 use Filament\Tables;
 use Filament\Tables\Table;
-use Filament\Tables\Columns\TextColumn;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\HtmlString;
-use App\Models\Order as OrderModel;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
-use Illuminate\Support\Facades\Cache;
 
 class OrderResource extends \Filament\Resources\Resource
 {
@@ -56,7 +55,7 @@ class OrderResource extends \Filament\Resources\Resource
         return $form->schema([
             Grid::make(12)->schema([
 
-                /* ===================== LEFT ===================== */
+                /* ===================== LEFT COLUMN ===================== */
                 Grid::make()->schema([
 
                     Section::make(__('orders.type_parties'))->schema([
@@ -85,18 +84,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->searchable()
                                 ->required()
                                 ->live()
-                                ->afterStateUpdated(function ($get, Set $set, $state) {
-                                    $items = $get('items') ?? [];
-                                    $customerId = (int) ($get('customer_id') ?? 0);
-                                    $branchId = (int) $state;
-
-                                    foreach ($items as $uuid => $item) {
-                                        if (empty($item['is_custom']) && !empty($item['product_id'])) {
-                                            $html = self::generateItemExtrasHtml((int)$item['product_id'], $branchId, $customerId);
-                                            $set("items.$uuid.extra_info_html", $html);
-                                        }
-                                    }
-                                })
+                                // Logic removed here: Placeholder automatically updates when branch_id changes
                                 ->columnSpan(9),
 
                             Placeholder::make('seller_info')
@@ -105,6 +93,12 @@ class OrderResource extends \Filament\Resources\Resource
 
                             Select::make('customer_id')
                                 ->label(__('orders.customer'))
+                                ->relationship('customer', 'name', function (Builder $query) {
+                                    $user = Auth::user();
+                                    if ($user && $user->hasAnyRole(['Seller', 'seller']) && !$user->hasAnyRole(['Admin', 'admin'])) {
+                                        $query->where('seller_id', $user->id);
+                                    }
+                                })
                                 ->searchable()
                                 ->preload()
                                 ->createOptionForm([
@@ -123,10 +117,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         'seller_id' => $user?->hasRole('Seller') ? $user->id : null,
                                     ])->getKey();
                                 })
-                                ->getSearchResultsUsing(fn (string $search) => Customer::query()
-                                    ->where('name', 'like', "%{$search}%")
-                                    ->limit(50)->pluck('name', 'id'))
-                                ->getOptionLabelUsing(fn ($value) => Customer::whereKey($value)->value('name'))
                                 ->columnSpan(12),
 
                             Select::make('status')
@@ -165,6 +155,58 @@ class OrderResource extends \Filament\Resources\Resource
                         ->schema([
 
                             Actions::make([
+                                Action::make('bulk_add')
+                                    ->label(__('Bulk Add via SKU'))
+                                    ->icon('heroicon-m-rectangle-stack')
+                                    ->color('info')
+                                    ->form([
+                                        Textarea::make('skus')
+                                            ->label('Enter SKUs (one per line)')
+                                            ->placeholder("TL123\nTL234\nTL555")
+                                            ->rows(10)
+                                            ->required()
+                                    ])
+                                    ->action(function (array $data, Get $get, Set $set) {
+                                        $rawSkus = explode("\n", $data['skus']);
+                                        $skus = array_filter(array_map('trim', $rawSkus));
+                                        
+                                        if (empty($skus)) return;
+
+                                        $rate = (float) ($get('exchange_rate') ?? 1);
+
+                                        $products = Product::whereIn('sku', $skus)->get()->keyBy('sku');
+
+                                        $currentItems = $get('items') ?? [];
+                                        $currentItems = array_values(is_array($currentItems) ? $currentItems : []);
+                                        $nextIndex = count($currentItems) + 1;
+
+                                        foreach ($skus as $sku) {
+                                            $p = $products->get($sku);
+                                            if (!$p) continue;
+
+                                            $base = (float) ($p->sale_price ?? $p->price ?? 0);
+                                            
+                                            $currentItems[] = [
+                                                'row_index'     => $nextIndex++,
+                                                'is_custom'     => false,
+                                                'product_id'    => $p->id,
+                                                'product_name'  => $p->title,
+                                                'sku'           => $p->sku,
+                                                'qty'           => 1,
+                                                'base_unit_usd' => $base,
+                                                'unit_price'    => round($base * $rate, 2),
+                                                'line_total'    => round($base * $rate, 2),
+                                                'thumb'         => self::productThumbUrl($p->image),
+                                                'note'          => null,
+                                                // Removed extra_info_html calculation here, placeholder handles it
+                                            ];
+                                        }
+
+                                        $set('items', $currentItems);
+                                        static::recomputeTotals($get, $set, true);
+                                        Notification::make()->title('Items added successfully')->success()->send();
+                                    }),
+
                                 Action::make('add_item_top')
                                     ->label('+ ' . __('orders.add_item'))
                                     ->button()
@@ -182,7 +224,6 @@ class OrderResource extends \Filament\Resources\Resource
                                             'base_unit_usd' => 0,
                                             'thumb'         => null,
                                             'note'          => null,
-                                            'extra_info_html' => null, 
                                         ]);
                                         
                                         $i = 1; 
@@ -216,7 +257,6 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set('items', $items);
                                     static::recomputeTotals($get, $set, true);
                                 })
-                                
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = $data['product_id'] ?? null;
                                     $data['is_custom'] = empty($pid);
@@ -228,23 +268,18 @@ class OrderResource extends \Filament\Resources\Resource
                                     }
                                     return $data;
                                 })
-
                                 ->mutateRelationshipDataBeforeSaveUsing(function (array $data): array {
                                     if (empty($data['product_id'])) {
-                                        // Custom Item: Use the 'sku' manually entered by user
                                         $data['product_id'] = null;
                                         $data['sku'] = $data['sku'] ?? 'CUSTOM'; 
                                     } else {
-                                        // Standard Item: Snapshot the product details
                                         $p = Product::select('title','sku')->find($data['product_id']);
                                         $data['product_name'] = $p?->title;
                                         $data['sku'] = $p?->sku;
                                     }
-                                    
-                                    unset($data['thumb'], $data['row_index'], $data['base_unit_usd'], $data['is_custom'], $data['extra_info_html']);
+                                    unset($data['thumb'], $data['row_index'], $data['base_unit_usd'], $data['is_custom']);
                                     return $data; 
                                 })
-
                                 ->schema([
                                     Grid::make(12)->schema([
                                         Placeholder::make('row_index_disp')
@@ -254,7 +289,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             ->columnSpan(1),
 
                                         Toggle::make('is_custom')
-                                            ->label('Custom Product')
+                                            ->label('Custom')
                                             ->onIcon('heroicon-m-pencil-square')
                                             ->offIcon('heroicon-m-cube')
                                             ->inline(false)
@@ -267,7 +302,6 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $set('thumb', null);
                                                 $set('unit_price', 0);
                                                 $set('line_total', 0);
-                                                $set('extra_info_html', null);
                                             })
                                             ->columnSpan(11),
                                     ]),
@@ -286,7 +320,7 @@ class OrderResource extends \Filament\Resources\Resource
                                     Select::make('product_id')
                                         ->label(__('orders.product'))
                                         ->searchable()
-                                        ->preload(false)
+                                        ->preload(false) 
                                         ->visible(fn ($get) => ! $get('is_custom'))
                                         ->required(fn ($get) => ! $get('is_custom'))
                                         ->getSearchResultsUsing(function (string $search) {
@@ -319,18 +353,11 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->live()
                                         ->afterStateUpdated(function ($state, $get, Set $set) {
                                             if (!$state) {
-                                                $set('product_id', null); return;
+                                                $set('product_id', null); 
+                                                return;
                                             }
 
-                                            $branchId = (int) ($get('../../branch_id') ?? 0);
-                                            $customerId = (int) ($get('../../customer_id') ?? 0);
-
-                                            $p = Product::query()
-                                                ->leftJoin('product_branch as pb', function ($j) use ($branchId) {
-                                                    $j->on('pb.product_id', '=', 'products.id')->where('pb.branch_id', '=', $branchId);
-                                                })
-                                                ->where('products.id', $state)
-                                                ->first(['products.*']);
+                                            $p = Product::find($state);
 
                                             if ($p) {
                                                 $base = (float) ($p->sale_price ?? $p->price ?? 0);
@@ -343,9 +370,8 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $set('thumb', self::productThumbUrl($p->image));
                                                 $set('qty', max(1, (int)$get('qty')));
 
-                                                $html = self::generateItemExtrasHtml($p->id, $branchId, $customerId);
-                                                $set('extra_info_html', $html);
-
+                                                // No need to set extra_info_html here manually anymore
+                                                
                                                 self::recomputeLineAndTotals($get, $set);
                                             }
                                         })
@@ -353,27 +379,21 @@ class OrderResource extends \Filament\Resources\Resource
 
                                     TextInput::make('product_name') 
                                         ->label(__('Item Name'))
-                                        ->placeholder('Enter item name')
                                         ->visible(fn ($get) => $get('is_custom'))
                                         ->required(fn ($get) => $get('is_custom'))
                                         ->dehydrated(true)
                                         ->columnSpan(7),
 
-                                    // === CHANGED LOGIC FOR SKU DISPLAY ===
-                                    
-                                    // 1. Display Text for Standard Products
                                     Placeholder::make('sku_display')
                                         ->label('SKU')
                                         ->content(fn ($get) => new HtmlString('<span style="color:#f97316;">' . e((string)($get('sku') ?? '—')) . '</span>'))
                                         ->visible(fn ($get) => ! $get('is_custom'))
                                         ->columnSpan(2),
 
-                                    // 2. Editable Input for Custom Products
                                     TextInput::make('sku')
                                         ->label('SKU')
-                                        ->placeholder('Custom SKU')
                                         ->visible(fn ($get) => $get('is_custom'))
-                                        ->dehydrated(true) // Make sure this saves!
+                                        ->dehydrated(true)
                                         ->columnSpan(2),
 
                                     TextInput::make('qty')
@@ -381,7 +401,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->numeric()
                                         ->minValue(1)
                                         ->default(1)
-                                        ->live(debounce: 600)
+                                        ->live(onBlur: true) 
                                         ->afterStateUpdated(fn ($get, Set $set) => self::recomputeLineAndTotals($get, $set))
                                         ->columnSpan(2),
 
@@ -401,19 +421,20 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->dehydrated(true)
                                         ->columnSpan(3),
 
-                                    TextInput::make('extra_info_html')->hidden()->dehydrated(false),
-
+                                    // IMPORTANT: Dynamic Placeholder Calculation
                                     Placeholder::make('info_row')
                                         ->label(' ')
-                                        ->content(function ($get) {
-                                            if ($get('is_custom')) {
-                                                return null;
-                                            }
-                                            $html = $get('extra_info_html');
-                                            if (!empty($html)) {
-                                                return new HtmlString($html);
-                                            }
-                                            return new HtmlString('<span style="color:#9CA3AF;">'.e(__('orders.no_extra')).'</span>');
+                                        ->content(function (Get $get) {
+                                            if ($get('is_custom')) return null;
+                                            
+                                            $productId  = (int) $get('product_id');
+                                            $branchId   = (int) $get('../../branch_id');
+                                            $customerId = (int) $get('../../customer_id');
+
+                                            if (!$productId) return null;
+
+                                            $html = OrderResource::generateItemExtrasHtml($productId, $branchId, $customerId);
+                                            return new HtmlString($html);
                                         })
                                         ->columnSpan(12),
 
@@ -440,9 +461,11 @@ class OrderResource extends \Filament\Resources\Resource
 
                 ])->columnSpan(['default' => 12, 'xl' => 8]),
 
+                 /* ===================== RIGHT COLUMN (TOTALS) ===================== */
                  Section::make(__('orders.currency_totals'))
                     ->schema([
                         Grid::make(12)->schema([
+                            
                             Select::make('currency')
                                 ->label(__('orders.currency'))
                                 ->options(fn () => CurrencyRate::orderBy('code')->pluck('code','code'))
@@ -470,11 +493,11 @@ class OrderResource extends \Filament\Resources\Resource
 
                             TextInput::make('exchange_rate')->numeric()->default(1.0)->disabled()->dehydrated()->columnSpan(8),
                             TextInput::make('subtotal')->numeric()->readOnly()->default(0)->columnSpan(6),
+                            
                             TextInput::make('discount')
                                 ->numeric()
                                 ->default(0)
                                 ->live(onBlur: true)
-                                // CHANGE THIS LINE: Type hint Get and Set explicitly
                                 ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
                                 ->columnSpan(6),
 
@@ -482,11 +505,10 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->default(0)
                                 ->live(onBlur: true)
-                                // CHANGE THIS LINE
                                 ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
                                 ->columnSpan(6),
 
-                            TextInput::make('extra_fees_percent') // <--- Was 'extra_fees', change to 'extra_fees_percent'
+                            TextInput::make('extra_fees_percent')
                                 ->label('Extra Fees (%)')
                                 ->numeric()
                                 ->default(0)
@@ -498,13 +520,26 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->default(0)
                                 ->visible(fn($get) => $get('type') === 'order' && $get('payment_status') === 'partial')
                                 ->columnSpan(12),
-                         // ADD THIS HIDDEN FIELD
-                            TextInput::make('extra_fees')
-                                ->hidden()
-                                ->dehydrated()
-                                ->numeric()
-                                ->default(0),       
+                         
+                            TextInput::make('extra_fees')->hidden()->dehydrated()->numeric()->default(0),       
                             TextInput::make('total')->numeric()->readOnly()->default(0)->columnSpan(12),
+
+                            // Save Button at bottom of totals
+                            Actions::make([
+                                Action::make('save_order')
+                                    ->label('Save')
+                                    ->button()
+                                    ->color('primary')
+                                    ->icon('heroicon-o-check-circle')
+                                    ->action(function ($livewire) {
+                                        if ($livewire instanceof \Filament\Resources\Pages\CreateRecord) {
+                                            $livewire->create();
+                                        } else {
+                                            $livewire->save();
+                                        }
+                                    }),
+                            ])->columnSpan(12)->alignment('center'),
+
                         ]),
                     ])
                     ->extraAttributes(['class' => 'xl:sticky', 'style' => 'position:sticky; top:96px;'])
@@ -513,32 +548,38 @@ class OrderResource extends \Filament\Resources\Resource
         ]);
     }
 
-    // ... (Helpers unchanged)
     public static function generateItemExtrasHtml(int $productId, int $branchId, int $customerId): string
     {
         if ($productId <= 0) return '';
         $parts = [];
+        
+        // --- FIXED LOGIC FOR FETCHING STOCK ---
         if ($branchId > 0) {
-            $stock = DB::table('product_branch')->where('product_id', $productId)->where('branch_id', $branchId)->value('stock');
-            if ($stock !== null) {
-                $color = ((int)$stock > 0) ? '#065f46' : '#b91c1c';
-                $parts[] = "<span style='font-weight:700;color:{$color}'>".__('orders.stock').":</span> ". $stock;
-            }
+            $stock = ProductBranch::where('product_id', $productId)
+                ->where('branch_id', $branchId)
+                ->value('stock');
+
+            $displayStock = $stock ?? 0;
+            
+            $color = ((int)$displayStock > 0) ? '#065f46' : '#b91c1c';
+            $parts[] = "<span style='font-weight:700;color:{$color}'>".__('orders.stock').":</span> ". $displayStock;
         }
+
         if ($customerId > 0) {
             $prev = OrderItem::query()
                 ->join('orders', 'orders.id', '=', 'order_items.order_id')
                 ->where('orders.customer_id', $customerId)
                 ->where('order_items.product_id', $productId)
                 ->orderByDesc('orders.created_at')
-                ->limit(10)
+                ->limit(3) 
                 ->get(['order_items.unit_price', 'orders.currency', 'orders.created_at']);
+            
             if ($prev->count() > 0) {
                 $items = $prev->map(function ($row) {
                     $price = number_format((float)$row->unit_price, 2);
                     $cur   = $row->currency;
                     $date  = Carbon::parse($row->created_at)->toDateString();
-                    return "<div>{$price} {$cur} " . __('orders.on') . " {$date}</div>";
+                    return "<div>{$price} {$cur} ({$date})</div>";
                 })->implode('');
                 $parts[] = "<div style='color:#374151;'><strong>".__('orders.prev_sales').":</strong><div>{$items}</div></div>";
             }
@@ -546,7 +587,8 @@ class OrderResource extends \Filament\Resources\Resource
         if (empty($parts)) return '<span style="color:#9CA3AF;">'.e(__('orders.no_extra')).'</span>';
         return '<div style="margin-top:6px">'.implode(' &nbsp; • &nbsp; ', $parts).'</div>';
     }
-
+    
+    // ... recomputeTotals and other helpers remain the same ...
     public static function recomputeLineAndTotals($get, Set $set): void
     {
         $qty  = (float) ($get('qty') ?? 0);
@@ -562,91 +604,61 @@ class OrderResource extends \Filament\Resources\Resource
         $subtotal = 0.0;
         
         foreach ($items as $row) {
-            $subtotal += ((float)($row['qty']??0) * (float)($row['unit_price']??0));
+            $q = (float)($row['qty'] ?? 0);
+            $u = (float)($row['unit_price'] ?? 0);
+            $subtotal += ($q * $u);
         }
         
         $discount = (float) ($get('discount') ?? 0);
         $shipping = (float) ($get('shipping') ?? 0);
-        
-        // FIX HERE: Get the value from 'extra_fees_percent'
         $feesPct  = (float) ($get('extra_fees_percent') ?? 0); 
         
-        // Calculate the absolute amount
         $fees     = $subtotal * ($feesPct / 100.0);
-        
         $total    = max(0, $subtotal - $discount + $shipping + $fees);
         
         if ($calledFromItem) {
             $set('../../subtotal', round($subtotal, 2));
             $set('../../total', round($total, 2));
-            $set('../../extra_fees', round($fees, 2)); // Save absolute amount to hidden field
+            $set('../../extra_fees', round($fees, 2)); 
         } else {
             $set('subtotal', round($subtotal, 2));
             $set('total', round($total, 2));
-            $set('extra_fees', round($fees, 2)); // Save absolute amount to hidden field
+            $set('extra_fees', round($fees, 2));
         }
     }
-public static function table(Table $table): Table
+
+    public static function table(Table $table): Table
     {
         return $table
             ->columns([
-                Tables\Columns\TextColumn::make('id')
-                    ->label('#')
-                    ->sortable()
-                    ->searchable(),
-
-                Tables\Columns\TextColumn::make('customer.name')
-                    ->label(__('orders.customer'))
-                    ->searchable()
-                    ->sortable(),
-
-                Tables\Columns\TextColumn::make('branch.name')
-                    ->label(__('orders.branch'))
-                    ->sortable(),
-
-                Tables\Columns\TextColumn::make('type')
-                    ->label(__('orders.type'))
-                    ->badge()
+                Tables\Columns\TextColumn::make('id')->label('#')->sortable()->searchable(),
+                Tables\Columns\TextColumn::make('customer.name')->label(__('orders.customer'))->searchable()->sortable(),
+                Tables\Columns\TextColumn::make('branch.name')->label(__('orders.branch'))->sortable(),
+                Tables\Columns\TextColumn::make('type')->label(__('orders.type'))->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'order' => 'success',
                         'proforma' => 'warning',
                         default => 'gray',
                     }),
-
-                Tables\Columns\TextColumn::make('status')
-                    ->label(__('orders.status'))
-                    ->badge()
+                Tables\Columns\TextColumn::make('status')->label(__('orders.status'))->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'completed' => 'success',
                         'processing', 'pending' => 'warning',
                         'cancelled', 'failed' => 'danger',
-                        'draft', 'on_hold' => 'gray',
                         default => 'primary',
                     }),
-
-                Tables\Columns\TextColumn::make('payment_status')
-                    ->label(__('orders.payment_status'))
-                    ->badge()
+                Tables\Columns\TextColumn::make('payment_status')->label(__('orders.payment_status'))->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'paid' => 'success',
                         'partial' => 'warning',
                         'unpaid' => 'danger',
                         default => 'gray',
                     }),
-
-                Tables\Columns\TextColumn::make('total')
-                    ->label(__('orders.total'))
-                    ->money(fn ($record) => $record->currency ?? 'USD')
-                    ->sortable(),
-
-                Tables\Columns\TextColumn::make('created_at')
-                    ->label('Date')
-                    ->date()
-                    ->sortable(),
+                Tables\Columns\TextColumn::make('total')->label(__('orders.total'))->money(fn ($record) => $record->currency ?? 'USD')->sortable(),
+                Tables\Columns\TextColumn::make('created_at')->label('Date')->date()->sortable(),
             ])
             ->defaultSort('created_at', 'desc')
             ->filters([
-                // You can add filters here later (e.g., Filter by Status)
                 Tables\Filters\SelectFilter::make('status')
                     ->options([
                         'draft' => 'Draft',
