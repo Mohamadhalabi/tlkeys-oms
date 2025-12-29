@@ -28,9 +28,8 @@ use Filament\Tables;
 use Filament\Tables\Table;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\HtmlString;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\HtmlString;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 
@@ -40,6 +39,21 @@ class OrderResource extends \Filament\Resources\Resource
     protected static ?string $navigationIcon = 'heroicon-o-receipt-percent';
     protected static ?string $navigationGroup = 'Sales';
     protected static ?string $navigationLabel = 'Orders';
+
+    /**
+     * Requirement: Sellers only see their own orders
+     */
+    public static function getEloquentQuery(): Builder
+    {
+        $query = parent::getEloquentQuery();
+        $user = Auth::user();
+
+        if ($user && $user->hasAnyRole(['Seller', 'seller']) && !$user->hasAnyRole(['Admin', 'admin'])) {
+            $query->where('seller_id', $user->id);
+        }
+
+        return $query;
+    }
 
     public static function getPages(): array
     {
@@ -84,11 +98,11 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->searchable()
                                 ->required()
                                 ->live()
-                                // Logic removed here: Placeholder automatically updates when branch_id changes
                                 ->columnSpan(9),
 
                             Placeholder::make('seller_info')
-                                ->content(fn () => __('orders.seller') . ': ' . e(Auth::user()?->name ?? ''))
+                                ->label(__('orders.seller'))
+                                ->content(fn () => e(Auth::user()?->name ?? ''))
                                 ->columnSpan(12),
 
                             Select::make('customer_id')
@@ -173,7 +187,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         if (empty($skus)) return;
 
                                         $rate = (float) ($get('exchange_rate') ?? 1);
-
                                         $products = Product::whereIn('sku', $skus)->get()->keyBy('sku');
 
                                         $currentItems = $get('items') ?? [];
@@ -198,7 +211,6 @@ class OrderResource extends \Filament\Resources\Resource
                                                 'line_total'    => round($base * $rate, 2),
                                                 'thumb'         => self::productThumbUrl($p->image),
                                                 'note'          => null,
-                                                // Removed extra_info_html calculation here, placeholder handles it
                                             ];
                                         }
 
@@ -207,12 +219,28 @@ class OrderResource extends \Filament\Resources\Resource
                                         Notification::make()->title('Items added successfully')->success()->send();
                                     }),
 
+                                /**
+                                 * Requirement: Prevent adding new item unless current one is filled
+                                 */
                                 Action::make('add_item_top')
                                     ->label('+ ' . __('orders.add_item'))
                                     ->button()
                                     ->action(function ($get, Set $set) {
                                         $items = $get('items') ?? [];
                                         $items = array_values(is_array($items) ? $items : []);
+                                        
+                                        if (!empty($items)) {
+                                            $firstItem = $items[0]; 
+                                            // Validate product selection for standard items or name for custom items
+                                            if ((!$firstItem['is_custom'] && empty($firstItem['product_id'])) || ($firstItem['is_custom'] && empty($firstItem['product_name']))) {
+                                                Notification::make()
+                                                    ->title(__('orders.validation_empty_item'))
+                                                    ->warning()
+                                                    ->send();
+                                                return;
+                                            }
+                                        }
+
                                         array_unshift($items, [
                                             'is_custom'     => false,
                                             'product_id'    => null,
@@ -289,7 +317,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             ->columnSpan(1),
 
                                         Toggle::make('is_custom')
-                                            ->label('Custom')
+                                            ->label(__('Custom'))
                                             ->onIcon('heroicon-m-pencil-square')
                                             ->offIcon('heroicon-m-cube')
                                             ->inline(false)
@@ -370,8 +398,6 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $set('thumb', self::productThumbUrl($p->image));
                                                 $set('qty', max(1, (int)$get('qty')));
 
-                                                // No need to set extra_info_html here manually anymore
-                                                
                                                 self::recomputeLineAndTotals($get, $set);
                                             }
                                         })
@@ -421,7 +447,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->dehydrated(true)
                                         ->columnSpan(3),
 
-                                    // IMPORTANT: Dynamic Placeholder Calculation
                                     Placeholder::make('info_row')
                                         ->label(' ')
                                         ->content(function (Get $get) {
@@ -524,7 +549,6 @@ class OrderResource extends \Filament\Resources\Resource
                             TextInput::make('extra_fees')->hidden()->dehydrated()->numeric()->default(0),       
                             TextInput::make('total')->numeric()->readOnly()->default(0)->columnSpan(12),
 
-                            // Save Button at bottom of totals
                             Actions::make([
                                 Action::make('save_order')
                                     ->label('Save')
@@ -553,14 +577,12 @@ class OrderResource extends \Filament\Resources\Resource
         if ($productId <= 0) return '';
         $parts = [];
         
-        // --- FIXED LOGIC FOR FETCHING STOCK ---
         if ($branchId > 0) {
             $stock = ProductBranch::where('product_id', $productId)
                 ->where('branch_id', $branchId)
                 ->value('stock');
 
             $displayStock = $stock ?? 0;
-            
             $color = ((int)$displayStock > 0) ? '#065f46' : '#b91c1c';
             $parts[] = "<span style='font-weight:700;color:{$color}'>".__('orders.stock').":</span> ". $displayStock;
         }
@@ -588,7 +610,6 @@ class OrderResource extends \Filament\Resources\Resource
         return '<div style="margin-top:6px">'.implode(' &nbsp; • &nbsp; ', $parts).'</div>';
     }
     
-    // ... recomputeTotals and other helpers remain the same ...
     public static function recomputeLineAndTotals($get, Set $set): void
     {
         $qty  = (float) ($get('qty') ?? 0);
@@ -632,6 +653,14 @@ class OrderResource extends \Filament\Resources\Resource
         return $table
             ->columns([
                 Tables\Columns\TextColumn::make('id')->label('#')->sortable()->searchable(),
+                /**
+                 * Requirement: Display who created the order (Seller)
+                 */
+                Tables\Columns\TextColumn::make('seller.name')
+                    ->label(__('orders.seller'))
+                    ->placeholder('No Seller')
+                    ->sortable()
+                    ->searchable(),
                 Tables\Columns\TextColumn::make('customer.name')->label(__('orders.customer'))->searchable()->sortable(),
                 Tables\Columns\TextColumn::make('branch.name')->label(__('orders.branch'))->sortable(),
                 Tables\Columns\TextColumn::make('type')->label(__('orders.type'))->badge()
@@ -645,6 +674,7 @@ class OrderResource extends \Filament\Resources\Resource
                         'completed' => 'success',
                         'processing', 'pending' => 'warning',
                         'cancelled', 'failed' => 'danger',
+                        'on_hold' => 'info',
                         default => 'primary',
                     }),
                 Tables\Columns\TextColumn::make('payment_status')->label(__('orders.payment_status'))->badge()
@@ -666,6 +696,11 @@ class OrderResource extends \Filament\Resources\Resource
                         'processing' => 'Processing',
                         'completed' => 'Completed',
                     ]),
+                /**
+                 * Requirement: Allow filtering by seller
+                 */
+                Tables\Filters\SelectFilter::make('seller')
+                    ->relationship('seller', 'name')
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),

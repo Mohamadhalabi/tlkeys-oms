@@ -9,7 +9,22 @@
     $isRtl  = ($locale === 'ar');
     $dir    = $isRtl ? 'rtl' : 'ltr';
 
-    // --- Simple translations (EN / AR, default EN) ---
+    // --- Determine Document Type (Order vs Proforma) ---
+    // Check the 'type' column from your database screenshot
+    $orderType = $order->type ?? 'order'; 
+    $isProforma = ($orderType === 'proforma');
+
+    // --- Dynamic Labels based on Type ---
+    if ($isRtl) {
+        $labelNumber = $isProforma ? 'رقم عرض السعر' : 'رقم الطلب';
+        $labelDate   = $isProforma ? 'تاريخ عرض السعر' : 'تاريخ الطلب';
+    } else {
+        // "Quota" usually implies a limit; "Quote" is the standard term for a proforma/price estimate.
+        $labelNumber = $isProforma ? 'Quote Number' : 'Order Number';
+        $labelDate   = $isProforma ? 'Quote Date' : 'Order Date';
+    }
+
+    // --- Simple translations (EN / AR) ---
     if ($isRtl) {
         $t = [
             'customer_details' => 'تفاصيل العميل',
@@ -24,8 +39,6 @@
             'price'            => 'السعر',
             'qty'              => 'الكمية',
             'total'            => 'الإجمالي',
-            'order_number'     => 'رقم الطلب',
-            'order_date'       => 'تاريخ الطلب',
             'customer_id'      => 'رقم العميل',
             'order_summary'    => 'ملخص الطلب',
             'subtotal'         => 'الإجمالي الفرعي',
@@ -50,8 +63,6 @@
             'price'            => 'Price',
             'qty'              => 'Quantity',
             'total'            => 'Total',
-            'order_number'     => 'Order Number',
-            'order_date'       => 'Order Date',
             'customer_id'      => 'Customer ID',
             'order_summary'    => 'Order Summary',
             'subtotal'         => 'Sub total',
@@ -360,16 +371,17 @@
                         src="https://dev-srv.tlkeys.com/storage/AAAA/techno-lock-desktop-logo.jpg"
                         alt="Logo"
                     >
-                    {{-- Or use storage path: <img src="{{ $logoPath }}" class="logo-img {{ $isRtl ? 'logo-img-rtl' : 'logo-img-ltr' }}" alt="Logo"> --}}
                 @endif
 
                 <div class="order-meta">
+                    {{-- Dynamic Doc Number Label --}}
                     <div>
-                        <span class="label">{{ $t['order_number'] }}: </span>
+                        <span class="label">{{ $labelNumber }}: </span>
                         <span>#{{ $docCode }}</span>
                     </div>
+                    {{-- Dynamic Doc Date Label --}}
                     <div>
-                        <span class="label">{{ $t['order_date'] }}: </span>
+                        <span class="label">{{ $labelDate }}: </span>
                         <span>{{ $docDate }}</span>
                     </div>
                     <div>
@@ -534,10 +546,11 @@
                 </table>
 
                 {{-- centered stamp just under the totals table --}}
+                <div class="stamp" style="margin-left:auto;">{{ $stampText }}</div>
             </td>
         </tr>
     </table>
-                <div class="stamp">{{ $stampText }}</div>
+    
     {{-- Note --}}
     <div class="note-label">{{ $t['note'] }}:</div>
     <div class="note-line"></div>

@@ -2,12 +2,12 @@
 
 return [
     // Sections
-    'type_parties'   => 'Type & Parties',
-    'items'          => 'Items',
-    'items_desc'     => 'Search by SKU or title. Sale price is used when available; stock is per selected branch.',
-    'currency_totals'=> 'Currency & Totals',
+    'type_parties'    => 'Type & Parties',
+    'items'           => 'Items',
+    'items_desc'      => 'Search by SKU or Name. Sale price used if available; stock based on selected branch.',
+    'currency_totals' => 'Currency & Totals',
 
-    // Fields (left)
+    // Fields (Left)
     'type'           => 'Type',
     'proforma'       => 'Proforma',
     'order'          => 'Order',
@@ -15,50 +15,50 @@ return [
     'seller'         => 'Seller',
     'customer'       => 'Customer',
     'customer_hint'  => 'Required for Order, optional for Proforma.',
-    'customer_name'  => 'Customer name',
+    'customer_name'  => 'Customer Name',
 
-    // Order state fields (only when type = order)
-    'status'             => 'Status',
-    'status_draft'       => 'Draft',
-    'status_pending'     => 'Pending',
-    'status_processing'  => 'Processing',
-    'status_completed'   => 'Completed',
-    'status_cancelled'   => 'Cancelled',
-    'status_refunded'    => 'Refunded',
-    'status_failed'      => 'Failed',
-    'status_on_hold'     => 'On hold',
+    // Order Status (When Type = Order)
+    'status'            => 'Status',
+    'status_draft'      => 'Draft',
+    'status_pending'    => 'Pending',
+    'status_processing' => 'Processing',
+    'status_completed'  => 'Completed',
+    'status_cancelled'  => 'Cancelled',
+    'status_refunded'   => 'Refunded',
+    'status_failed'     => 'Failed',
+    'status_on_hold'    => 'On Hold',
 
-    'payment_status' => 'Payment status',
+    'payment_status' => 'Payment Status',
     'unpaid'         => 'Unpaid',
     'paid'           => 'Paid',
+    'partial'        => 'Partial',
+    'paid_amount'    => 'Paid Amount',
+    'paid_amount_hint' => 'Enter the amount received for this order.',
 
-    // Items repeater
+    // Items Repeater
     'product'      => 'Product',
     'qty'          => 'Qty',
-    'unit'         => 'Unit price',
-    'line_total'   => 'Line total',
+    'unit'         => 'Unit Price',
+    'line_total'   => 'Subtotal',
     'stock'        => 'Stock',
-    'prev_sales'   => 'Previous sales',
+    'prev_sales'   => 'Previous Sales',
     'on'           => 'on',
-    'no_extra'     => 'No extra info available.',
-    'item_exists'  => 'This product is already in the list.',
+    'no_extra'     => 'No extra information.',
+    'item_exists'  => 'This item is already in the list.',
+    'add_item'     => 'Add Item',
+    'item_note'    => 'Item Note',
+    'item_note_placeholder' => 'Internal/Customer note for this item (appears on PDF).',
+    'validation_empty_item' => 'Please fill the empty item before adding a new one.',
 
-    // Right panel (totals)
-    'currency'     => 'Currency',
-    'usd_to_rate'  => 'USD → Currency rate',
-    'subtotal'     => 'Subtotal',
-    'discount'     => 'Discount',
-    'shipping'     => 'Shipping',
-    'extra_fees'   => 'Extra fees %',
-    'extra_fees_hint' => 'Percentage applied on subtotal',
-    'total'        => 'Total',
-        'partial' => 'Partial',
-    'paid_amount' => 'Paid amount',
-    'paid_amount_hint' => 'Enter the amount received for this order.',
-    'add_item' => 'Add item',
-    'item_note' => 'Item note',
-    'item_note_placeholder' => 'Internal/customer note for this item (shown on PDF).',
-    'invoice_note' => 'Invoice note (appears at bottom of PDF)',
+    // Totals Panel (Right)
+    'currency'       => 'Currency',
+    'usd_to_rate'    => 'USD → Conversion Rate',
+    'subtotal'       => 'Subtotal',
+    'discount'       => 'Discount',
+    'shipping'       => 'Shipping',
+    'extra_fees'     => 'Extra Fees %',
+    'extra_fees_hint'=> 'Percentage applied to subtotal',
+    'total'          => 'Total',
+    'invoice_note'   => 'Invoice Note (appears at bottom of PDF)',
     'invoice_note_placeholder' => 'Any message or terms to print at the bottom of the invoice.',
-
 ];
