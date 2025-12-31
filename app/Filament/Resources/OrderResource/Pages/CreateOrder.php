@@ -16,7 +16,6 @@ class CreateOrder extends CreateRecord
 {
     protected static string $resource = OrderResource::class;
 
-    // Modification 2: Only show one "Save" button
     protected function getFormActions(): array
     {
         return [
@@ -34,7 +33,6 @@ class CreateOrder extends CreateRecord
 
     protected function getCreateAnotherFormAction(): Actions\Action
     {
-        // Disable create another by returning a hidden action or just not using it in getFormActions
         return parent::getCreateAnotherFormAction()->hidden();
     }
 

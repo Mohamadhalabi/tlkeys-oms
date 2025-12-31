@@ -56,31 +56,6 @@ class EditOrder extends EditRecord
         return $data;
     }
 
-    protected function mutateFormDataBeforeFill(array $data): array
-    {
-        /** @var \App\Models\Order $order */
-        $order = $this->getRecord();
-        
-        $order->loadMissing([
-            'items' => fn ($q) => $q->orderBy('sort'),
-            'items.product' => fn ($q) => $q->select('id', 'sku', 'image', 'price', 'sale_price', 'title'),
-        ]);
-
-        $items = [];
-
-        foreach ($order->items as $item) {
-            $itemData = $item->toArray();
-            $itemData['is_custom'] = empty($item->product_id);
-            // No HTML generation needed here anymore.
-            // The placeholder in the form schema will generate it on render.
-            $items[] = $itemData;
-        }
-
-        $data['items'] = $items;
-
-        return $data;
-    }
-
     private function applyWalletSideEffects(Order $order): void
     {
         if ($order->type !== 'order' || !$order->customer_id) {

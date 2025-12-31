@@ -40,9 +40,6 @@ class OrderResource extends \Filament\Resources\Resource
     protected static ?string $navigationGroup = 'Sales';
     protected static ?string $navigationLabel = 'Orders';
 
-    /**
-     * Requirement: Sellers only see their own orders
-     */
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery();
@@ -112,6 +109,7 @@ class OrderResource extends \Filament\Resources\Resource
                                     if ($user && $user->hasAnyRole(['Seller', 'seller']) && !$user->hasAnyRole(['Admin', 'admin'])) {
                                         $query->where('seller_id', $user->id);
                                     }
+                                    return $query;
                                 })
                                 ->searchable()
                                 ->preload()
@@ -128,7 +126,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         'email'     => $data['email'] ?? null,
                                         'phone'     => $data['phone'] ?? null,
                                         'address'   => $data['address'] ?? null,
-                                        'seller_id' => $user?->hasRole('Seller') ? $user->id : null,
+                                        'seller_id' => ($user && $user->hasRole(['Seller', 'seller'])) ? $user->id : null,
                                     ])->getKey();
                                 })
                                 ->columnSpan(12),
@@ -219,9 +217,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         Notification::make()->title('Items added successfully')->success()->send();
                                     }),
 
-                                /**
-                                 * Requirement: Prevent adding new item unless current one is filled
-                                 */
                                 Action::make('add_item_top')
                                     ->label('+ ' . __('orders.add_item'))
                                     ->button()
@@ -231,7 +226,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         
                                         if (!empty($items)) {
                                             $firstItem = $items[0]; 
-                                            // Validate product selection for standard items or name for custom items
                                             if ((!$firstItem['is_custom'] && empty($firstItem['product_id'])) || ($firstItem['is_custom'] && empty($firstItem['product_name']))) {
                                                 Notification::make()
                                                     ->title(__('orders.validation_empty_item'))
@@ -285,15 +279,34 @@ class OrderResource extends \Filament\Resources\Resource
                                     $set('items', $items);
                                     static::recomputeTotals($get, $set, true);
                                 })
+                                /**
+                                 * CRITICAL FIX: Load the SAVED price from the DB, not the Product Catalog.
+                                 */
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = $data['product_id'] ?? null;
                                     $data['is_custom'] = empty($pid);
+                                    
+                                    // 1. Get the Parent Order's Exchange Rate
+                                    $orderId = $data['order_id'] ?? null;
+                                    $rate = 1;
+                                    if ($orderId) {
+                                        $order = Order::find($orderId);
+                                        $rate = (float) ($order?->exchange_rate ?? 1);
+                                    }
+                                    if ($rate <= 0) $rate = 1;
 
+                                    // 2. Set the base price using the SAVED unit_price, not the product default.
+                                    // This preserves your manual overrides (like 50 instead of 10).
+                                    $savedPrice = (float)($data['unit_price'] ?? 0);
+                                    $data['base_unit_usd'] = $savedPrice / $rate;
+
+                                    // 3. Load other product details (images, sku) purely for display
                                     if (!$data['is_custom'] && !empty($pid)) {
-                                        $prod = Product::select('image','sku')->find($pid);
+                                        $prod = Product::select('image', 'sku')->find($pid);
                                         $data['thumb'] = self::productThumbUrl($prod?->image);
                                         $data['sku']   = $prod?->sku;
                                     }
+                                    
                                     return $data;
                                 })
                                 ->mutateRelationshipDataBeforeSaveUsing(function (array $data): array {
@@ -329,6 +342,7 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $set('sku', null);
                                                 $set('thumb', null);
                                                 $set('unit_price', 0);
+                                                $set('base_unit_usd', 0);
                                                 $set('line_total', 0);
                                             })
                                             ->columnSpan(11),
@@ -436,7 +450,13 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->numeric()
                                         ->default(0)
                                         ->live(onBlur: true)
-                                        ->afterStateUpdated(fn ($get, Set $set) => self::recomputeLineAndTotals($get, $set))
+                                        // Update base_unit_usd when user types a manual price
+                                        ->afterStateUpdated(function ($state, Get $get, Set $set) {
+                                            $rate = (float) ($get('../../exchange_rate') ?? 1);
+                                            if ($rate <= 0) $rate = 1;
+                                            $set('base_unit_usd', (float)$state / $rate);
+                                            self::recomputeLineAndTotals($get, $set);
+                                        })
                                         ->columnSpan(3),
 
                                     TextInput::make('line_total')
@@ -504,6 +524,7 @@ class OrderResource extends \Filament\Resources\Resource
                                     foreach (array_keys($rows) as $i) {
                                         if (!$get("items.$i.is_custom")) {
                                             $base = (float)($get("items.$i.base_unit_usd") ?? 0);
+                                            
                                             if ($base > 0) {
                                                 $set("items.$i.unit_price", round($base * $rate, 2));
                                                 $q = (float)($get("items.$i.qty") ?? 0);
@@ -653,9 +674,6 @@ class OrderResource extends \Filament\Resources\Resource
         return $table
             ->columns([
                 Tables\Columns\TextColumn::make('id')->label('#')->sortable()->searchable(),
-                /**
-                 * Requirement: Display who created the order (Seller)
-                 */
                 Tables\Columns\TextColumn::make('seller.name')
                     ->label(__('orders.seller'))
                     ->placeholder('No Seller')
@@ -696,9 +714,6 @@ class OrderResource extends \Filament\Resources\Resource
                         'processing' => 'Processing',
                         'completed' => 'Completed',
                     ]),
-                /**
-                 * Requirement: Allow filtering by seller
-                 */
                 Tables\Filters\SelectFilter::make('seller')
                     ->relationship('seller', 'name')
             ])
