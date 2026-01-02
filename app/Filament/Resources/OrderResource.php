@@ -40,15 +40,14 @@ class OrderResource extends \Filament\Resources\Resource
     protected static ?string $navigationGroup = 'Sales';
     protected static ?string $navigationLabel = 'Orders';
 
+    // ... (Keep existing methods: getEloquentQuery, getPages) ...
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery();
         $user = Auth::user();
-
         if ($user && $user->hasAnyRole(['Seller', 'seller']) && !$user->hasAnyRole(['Admin', 'admin'])) {
             $query->where('seller_id', $user->id);
         }
-
         return $query;
     }
 
@@ -64,7 +63,64 @@ class OrderResource extends \Filament\Resources\Resource
     public static function form(Form $form): Form
     {
         return $form->schema([
-            Grid::make(12)->schema([
+            Grid::make(12)
+                // =========================================================
+                // 1. DEFINE GLOBAL ALPINE LOGIC AT THE ROOT GRID LEVEL
+                //    This ensures functions are available everywhere in the form
+                // =========================================================
+                ->extraAttributes([
+                    'x-data' => '{
+                        calculateRow(el) {
+                            // Find the row (Filament V3 structure)
+                            let row = el.closest(".fi-fo-repeater-item"); 
+                            if(!row) return;
+
+                            // Select inputs by the classes we added via extraInputAttributes
+                            let qtyInput = row.querySelector(".js-qty");
+                            let priceInput = row.querySelector(".js-price");
+                            let totalInput = row.querySelector(".js-line-total");
+
+                            let qty = parseFloat(qtyInput?.value || 0);
+                            let price = parseFloat(priceInput?.value || 0);
+                            let total = (qty * price).toFixed(2);
+
+                            if(totalInput) {
+                                totalInput.value = total;
+                                // Dispatch input event so Livewire/Alpine knows it changed
+                                totalInput.dispatchEvent(new Event("input", { bubbles: true }));
+                            }
+
+                            this.calculateGrandTotal();
+                        },
+
+                        calculateGrandTotal() {
+                            let subtotal = 0;
+                            
+                            // Sum up all line totals found in the DOM
+                            document.querySelectorAll(".js-line-total").forEach(input => {
+                                subtotal += parseFloat(input.value || 0);
+                            });
+
+                            // Get Footer Values
+                            let discount = parseFloat(document.querySelector(".js-discount")?.value || 0);
+                            let shipping = parseFloat(document.querySelector(".js-shipping")?.value || 0);
+                            let feePercent = parseFloat(document.querySelector(".js-fee-percent")?.value || 0);
+
+                            let fees = subtotal * (feePercent / 100);
+                            let total = subtotal - discount + shipping + fees;
+
+                            // Update Footer Fields
+                            let subEl = document.querySelector(".js-subtotal");
+                            let totEl = document.querySelector(".js-total");
+                            let feeEl = document.querySelector(".js-extra-fees");
+
+                            if(subEl) subEl.value = subtotal.toFixed(2);
+                            if(totEl) totEl.value = (total > 0 ? total : 0).toFixed(2);
+                            if(feeEl) feeEl.value = fees.toFixed(2);
+                        }
+                    }'
+                ])
+                ->schema([
 
                 /* ===================== LEFT COLUMN ===================== */
                 Grid::make()->schema([
@@ -224,6 +280,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         $items = $get('items') ?? [];
                                         $items = array_values(is_array($items) ? $items : []);
                                         
+                                        // Validation
                                         if (!empty($items)) {
                                             $firstItem = $items[0]; 
                                             if ((!$firstItem['is_custom'] && empty($firstItem['product_id'])) || ($firstItem['is_custom'] && empty($firstItem['product_name']))) {
@@ -264,29 +321,10 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->defaultItems(0)
                                 ->columns(12)
                                 ->addActionLabel('')
-                                ->live()
-                                ->afterStateUpdated(function ($get, Set $set, $state) {
-                                    $items = is_array($state) ? $state : ($get('items') ?? []);
-                                    $items = array_values(array_filter($items, fn ($r) => is_array($r)));
-
-                                    $i = 1; 
-                                    foreach ($items as $idx => $row) {
-                                        $qty  = (float) ($row['qty'] ?? 0);
-                                        $unit = (float) ($row['unit_price'] ?? 0);
-                                        $items[$idx]['row_index']  = $i++;
-                                        $items[$idx]['line_total'] = round($qty * $unit, 2);
-                                    }
-                                    $set('items', $items);
-                                    static::recomputeTotals($get, $set, true);
-                                })
-                                /**
-                                 * CRITICAL FIX: Load the SAVED price from the DB, not the Product Catalog.
-                                 */
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = $data['product_id'] ?? null;
                                     $data['is_custom'] = empty($pid);
                                     
-                                    // 1. Get the Parent Order's Exchange Rate
                                     $orderId = $data['order_id'] ?? null;
                                     $rate = 1;
                                     if ($orderId) {
@@ -295,12 +333,9 @@ class OrderResource extends \Filament\Resources\Resource
                                     }
                                     if ($rate <= 0) $rate = 1;
 
-                                    // 2. Set the base price using the SAVED unit_price, not the product default.
-                                    // This preserves your manual overrides (like 50 instead of 10).
                                     $savedPrice = (float)($data['unit_price'] ?? 0);
                                     $data['base_unit_usd'] = $savedPrice / $rate;
 
-                                    // 3. Load other product details (images, sku) purely for display
                                     if (!$data['is_custom'] && !empty($pid)) {
                                         $prod = Product::select('image', 'sku')->find($pid);
                                         $data['thumb'] = self::productThumbUrl($prod?->image);
@@ -386,7 +421,6 @@ class OrderResource extends \Filament\Resources\Resource
                                             if ($results->count() < $limit) {
                                                 $results = $results->concat(Product::where('title', 'like', "%$search%")->limit($limit - $results->count())->get());
                                             }
-                                            
                                             return $results->mapWithKeys(fn (Product $p) => [
                                                 $p->id => "{$p->sku} — ".str($p->title)->limit(70),
                                             ])->toArray();
@@ -436,26 +470,24 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->dehydrated(true)
                                         ->columnSpan(2),
 
+                                    // 2. USE extraInputAttributes to put class directly ON THE INPUT
                                     TextInput::make('qty')
                                         ->label(__('orders.qty'))
                                         ->numeric()
                                         ->minValue(1)
                                         ->default(1)
-                                        ->live(onBlur: true) 
-                                        ->afterStateUpdated(fn ($get, Set $set) => self::recomputeLineAndTotals($get, $set))
+                                        ->extraInputAttributes(['class' => 'js-qty', 'x-on:input' => 'calculateRow($el)'])
                                         ->columnSpan(2),
 
                                     TextInput::make('unit_price')
                                         ->label(__('orders.unit'))
                                         ->numeric()
                                         ->default(0)
-                                        ->live(onBlur: true)
-                                        // Update base_unit_usd when user types a manual price
+                                        ->extraInputAttributes(['class' => 'js-price', 'x-on:input' => 'calculateRow($el)'])
                                         ->afterStateUpdated(function ($state, Get $get, Set $set) {
                                             $rate = (float) ($get('../../exchange_rate') ?? 1);
                                             if ($rate <= 0) $rate = 1;
                                             $set('base_unit_usd', (float)$state / $rate);
-                                            self::recomputeLineAndTotals($get, $set);
                                         })
                                         ->columnSpan(3),
 
@@ -465,19 +497,17 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->readOnly()
                                         ->default(0)
                                         ->dehydrated(true)
+                                        ->extraInputAttributes(['class' => 'js-line-total'])
                                         ->columnSpan(3),
 
                                     Placeholder::make('info_row')
                                         ->label(' ')
                                         ->content(function (Get $get) {
                                             if ($get('is_custom')) return null;
-                                            
                                             $productId  = (int) $get('product_id');
                                             $branchId   = (int) $get('../../branch_id');
                                             $customerId = (int) $get('../../customer_id');
-
                                             if (!$productId) return null;
-
                                             $html = OrderResource::generateItemExtrasHtml($productId, $branchId, $customerId);
                                             return new HtmlString($html);
                                         })
@@ -538,37 +568,48 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->columnSpan(4),
 
                             TextInput::make('exchange_rate')->numeric()->default(1.0)->disabled()->dehydrated()->columnSpan(8),
-                            TextInput::make('subtotal')->numeric()->readOnly()->default(0)->columnSpan(6),
+                            
+                            TextInput::make('subtotal')
+                                ->numeric()
+                                ->readOnly()
+                                ->default(0)
+                                ->extraInputAttributes(['class' => 'js-subtotal'])
+                                ->columnSpan(6),
                             
                             TextInput::make('discount')
                                 ->numeric()
                                 ->default(0)
-                                ->live(onBlur: true)
-                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->extraInputAttributes(['class' => 'js-discount', 'x-on:input' => 'calculateGrandTotal()'])
                                 ->columnSpan(6),
 
                             TextInput::make('shipping')
                                 ->numeric()
                                 ->default(0)
-                                ->live(onBlur: true)
-                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->extraInputAttributes(['class' => 'js-shipping', 'x-on:input' => 'calculateGrandTotal()'])
                                 ->columnSpan(6),
 
                             TextInput::make('extra_fees_percent')
                                 ->label('Extra Fees (%)')
                                 ->numeric()
                                 ->default(0)
-                                ->live(onBlur: true)
-                                ->afterStateUpdated(fn (Get $get, Set $set) => static::recomputeTotals($get, $set))
+                                ->extraInputAttributes(['class' => 'js-fee-percent', 'x-on:input' => 'calculateGrandTotal()'])
                                 ->columnSpan(6),                         
+                            
                             TextInput::make('paid_amount')
                                 ->numeric()
                                 ->default(0)
                                 ->visible(fn($get) => $get('type') === 'order' && $get('payment_status') === 'partial')
                                 ->columnSpan(12),
                          
-                            TextInput::make('extra_fees')->hidden()->dehydrated()->numeric()->default(0),       
-                            TextInput::make('total')->numeric()->readOnly()->default(0)->columnSpan(12),
+                            TextInput::make('extra_fees')->hidden()->dehydrated()->numeric()->default(0)
+                                ->extraInputAttributes(['class' => 'js-extra-fees']),
+
+                            TextInput::make('total')
+                                ->numeric()
+                                ->readOnly()
+                                ->default(0)
+                                ->extraInputAttributes(['class' => 'js-total'])
+                                ->columnSpan(12),
 
                             Actions::make([
                                 Action::make('save_order')
@@ -592,6 +633,8 @@ class OrderResource extends \Filament\Resources\Resource
             ]),
         ]);
     }
+
+    // ... (Helper functions remain unchanged: generateItemExtrasHtml, recomputeLineAndTotals, recomputeTotals, table, productThumbUrl) ...
 
     public static function generateItemExtrasHtml(int $productId, int $branchId, int $customerId): string
     {

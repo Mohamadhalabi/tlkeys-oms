@@ -50,6 +50,33 @@ class CreateOrder extends CreateRecord
             $data['paid_amount']     = $data['paid_amount'] ?? 0;
         }
 
+        // -----------------------------------------------------------------
+        // FORCE SERVER-SIDE RECALCULATION BEFORE CREATE
+        // -----------------------------------------------------------------
+        $items = $data['items'] ?? [];
+        $subtotal = 0;
+        
+        foreach ($items as $key => $row) {
+            $qty = (float) ($row['qty'] ?? 0);
+            $price = (float) ($row['unit_price'] ?? 0);
+            
+            $lineTotal = round($qty * $price, 2);
+            $items[$key]['line_total'] = $lineTotal;
+            $subtotal += $lineTotal;
+        }
+
+        $data['items'] = $items;
+        $data['subtotal'] = round($subtotal, 2);
+        
+        $discount = (float) ($data['discount'] ?? 0);
+        $shipping = (float) ($data['shipping'] ?? 0);
+        $feesPct  = (float) ($data['extra_fees_percent'] ?? 0);
+        $fees     = $subtotal * ($feesPct / 100.0);
+        
+        $data['extra_fees'] = round($fees, 2);
+        $data['total'] = max(0, $subtotal - $discount + $shipping + $fees);
+        // -----------------------------------------------------------------
+
         return $this->normalizeOrderNumbers($data);
     }
 
