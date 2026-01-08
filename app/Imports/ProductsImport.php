@@ -18,6 +18,7 @@ use Maatwebsite\Excel\Concerns\WithBatchInserts;
  * - OR two columns: title_en, title_ar
  * - Optional cost price in column "cost_price" (or "cost")
  * Also updates stock for the selected branch.
+ * NOW ALSO UPDATES: price and sale_price if changed.
  */
 class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, WithBatchInserts, ShouldQueue
 {
@@ -31,25 +32,59 @@ class ProductsImport implements ToCollection, WithHeadingRow, WithChunkReading, 
                 if ($sku === '') continue;
 
                 $cost = $this->getCostPrice($row); // nullable
+                $price = $this->toFloat($row['price'] ?? null);
+                $salePrice = $this->toFloat($row['sale_price'] ?? null);
+                $weight = $this->toFloat($row['weight'] ?? null);
+                $image = (string) ($row['image'] ?? null);
 
-                // Create if missing (existing SKUs keep their fields; we update cost only if provided)
+                // 1. Create if missing (If SKU exists, this just fetches the model)
                 $product = Product::firstOrCreate(
                     ['sku' => $sku],
                     [
+                        // These are only used if the product is NEW
                         'title'       => $this->parseTitle($row),
-                        'price'       => $this->toFloat($row['price'] ?? null) ?? 0,
-                        'sale_price'  => $this->toFloat($row['sale_price'] ?? null),
-                        'cost_price'  => $cost, // may be null
-                        'weight'      => $this->toFloat($row['weight'] ?? null),
-                        'image'       => (string) ($row['image'] ?? null),
+                        'price'       => $price ?? 0,
+                        'sale_price'  => $salePrice,
+                        'cost_price'  => $cost,
+                        'weight'      => $weight,
+                        'image'       => $image,
                     ]
                 );
 
-                // If product already existed and a cost was provided, update it.
-                if ($cost !== null && (float) $product->cost_price !== (float) $cost) {
-                    $product->update(['cost_price' => $cost]);
+                // 2. Determine if we need to update existing fields (Price, Sale Price, Cost)
+                $updates = [];
+
+                // Update Price if provided and different
+                if ($price !== null && (float) $product->price !== $price) {
+                    $updates['price'] = $price;
                 }
 
+                // Update Sale Price if provided and different
+                if ($salePrice !== null && (float) $product->sale_price !== $salePrice) {
+                    $updates['sale_price'] = $salePrice;
+                }
+
+                // Update Cost Price if provided and different
+                if ($cost !== null && (float) $product->cost_price !== (float) $cost) {
+                    $updates['cost_price'] = $cost;
+                }
+
+                // If you also want to update weight/image for existing products, add them here:
+                /*
+                if ($weight !== null && (float) $product->weight !== $weight) {
+                    $updates['weight'] = $weight;
+                }
+                if ($image !== '' && $product->image !== $image) {
+                    $updates['image'] = $image;
+                }
+                */
+
+                // Perform the update if there are changes
+                if (!empty($updates)) {
+                    $product->update($updates);
+                }
+
+                // 3. Update Branch Stock
                 ProductBranch::updateOrCreate(
                     ['product_id' => $product->id, 'branch_id' => $this->branchId],
                     [
