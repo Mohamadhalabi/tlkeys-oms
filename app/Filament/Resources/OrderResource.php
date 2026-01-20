@@ -40,7 +40,6 @@ class OrderResource extends \Filament\Resources\Resource
     protected static ?string $navigationGroup = 'Sales';
     protected static ?string $navigationLabel = 'Orders';
 
-    // ... (Keep existing methods: getEloquentQuery, getPages) ...
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery();
@@ -63,19 +62,33 @@ class OrderResource extends \Filament\Resources\Resource
     public static function form(Form $form): Form
     {
         return $form->schema([
+            // 1. INJECT CSS FOR ROW COUNTING
+            Placeholder::make('css_counters')
+                ->hiddenLabel()
+                ->content(new HtmlString('
+                    <style>
+                        /* Initialize the counter on the repeater container */
+                        .order-repeater { 
+                            counter-reset: item-index; 
+                        }
+                        /* Increment the counter for every item */
+                        .order-repeater .fi-fo-repeater-item { 
+                            counter-increment: item-index; 
+                        }
+                        /* Display the counter in our placeholder span */
+                        .order-repeater .row-index-marker::after { 
+                            content: counter(item-index); 
+                        }
+                    </style>
+                ')),
+
             Grid::make(12)
-                // =========================================================
-                // 1. DEFINE GLOBAL ALPINE LOGIC AT THE ROOT GRID LEVEL
-                //    This ensures functions are available everywhere in the form
-                // =========================================================
                 ->extraAttributes([
                     'x-data' => '{
                         calculateRow(el) {
-                            // Find the row (Filament V3 structure)
                             let row = el.closest(".fi-fo-repeater-item"); 
                             if(!row) return;
 
-                            // Select inputs by the classes we added via extraInputAttributes
                             let qtyInput = row.querySelector(".js-qty");
                             let priceInput = row.querySelector(".js-price");
                             let totalInput = row.querySelector(".js-line-total");
@@ -86,7 +99,6 @@ class OrderResource extends \Filament\Resources\Resource
 
                             if(totalInput) {
                                 totalInput.value = total;
-                                // Dispatch input event so Livewire/Alpine knows it changed
                                 totalInput.dispatchEvent(new Event("input", { bubbles: true }));
                             }
 
@@ -96,12 +108,10 @@ class OrderResource extends \Filament\Resources\Resource
                         calculateGrandTotal() {
                             let subtotal = 0;
                             
-                            // Sum up all line totals found in the DOM
                             document.querySelectorAll(".js-line-total").forEach(input => {
                                 subtotal += parseFloat(input.value || 0);
                             });
 
-                            // Get Footer Values
                             let discount = parseFloat(document.querySelector(".js-discount")?.value || 0);
                             let shipping = parseFloat(document.querySelector(".js-shipping")?.value || 0);
                             let feePercent = parseFloat(document.querySelector(".js-fee-percent")?.value || 0);
@@ -109,7 +119,6 @@ class OrderResource extends \Filament\Resources\Resource
                             let fees = subtotal * (feePercent / 100);
                             let total = subtotal - discount + shipping + fees;
 
-                            // Update Footer Fields
                             let subEl = document.querySelector(".js-subtotal");
                             let totEl = document.querySelector(".js-total");
                             let feeEl = document.querySelector(".js-extra-fees");
@@ -245,7 +254,6 @@ class OrderResource extends \Filament\Resources\Resource
 
                                         $currentItems = $get('items') ?? [];
                                         $currentItems = array_values(is_array($currentItems) ? $currentItems : []);
-                                        $nextIndex = count($currentItems) + 1;
 
                                         foreach ($skus as $sku) {
                                             $p = $products->get($sku);
@@ -254,7 +262,7 @@ class OrderResource extends \Filament\Resources\Resource
                                             $base = (float) ($p->sale_price ?? $p->price ?? 0);
                                             
                                             $currentItems[] = [
-                                                'row_index'     => $nextIndex++,
+                                                // 'row_index' => Removed (handled by CSS now)
                                                 'is_custom'     => false,
                                                 'product_id'    => $p->id,
                                                 'product_name'  => $p->title,
@@ -280,7 +288,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         $items = $get('items') ?? [];
                                         $items = array_values(is_array($items) ? $items : []);
                                         
-                                        // Validation
                                         if (!empty($items)) {
                                             $firstItem = $items[0]; 
                                             if ((!$firstItem['is_custom'] && empty($firstItem['product_id'])) || ($firstItem['is_custom'] && empty($firstItem['product_name']))) {
@@ -293,6 +300,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         }
 
                                         array_unshift($items, [
+                                            // 'row_index' => Removed (handled by CSS now)
                                             'is_custom'     => false,
                                             'product_id'    => null,
                                             'product_name'  => null,
@@ -305,11 +313,6 @@ class OrderResource extends \Filament\Resources\Resource
                                             'note'          => null,
                                         ]);
                                         
-                                        $i = 1; 
-                                        foreach ($items as &$row) {
-                                            $row = is_array($row) ? $row : [];
-                                            $row['row_index'] = $i++;
-                                        }
                                         $set('items', $items);
                                         static::recomputeTotals($get, $set, true);
                                     }),
@@ -321,6 +324,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->defaultItems(0)
                                 ->columns(12)
                                 ->addActionLabel('')
+                                ->extraAttributes(['class' => 'order-repeater']) // <--- CSS CLASS ADDED
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = $data['product_id'] ?? null;
                                     $data['is_custom'] = empty($pid);
@@ -353,15 +357,18 @@ class OrderResource extends \Filament\Resources\Resource
                                         $data['product_name'] = $p?->title;
                                         $data['sku'] = $p?->sku;
                                     }
-                                    unset($data['thumb'], $data['row_index'], $data['base_unit_usd'], $data['is_custom']);
+                                    unset($data['thumb'], $data['base_unit_usd'], $data['is_custom']);
                                     return $data; 
                                 })
                                 ->schema([
                                     Grid::make(12)->schema([
+                                        
+                                        // 3. UPDATED INDEX COLUMN
                                         Placeholder::make('row_index_disp')
                                             ->label('#')
-                                            ->content(fn ($get) => (string)($get('row_index') ?? ''))
-                                            ->extraAttributes(['style' => 'font-weight:600; color:#6b7280; padding-top:5px'])
+                                            // This span will automatically get the number via CSS
+                                            ->content(new HtmlString('<span class="row-index-marker" style="font-weight:600; color:#6b7280; font-size:1.1em;"></span>'))
+                                            ->extraAttributes(['style' => 'padding-top:5px'])
                                             ->columnSpan(1),
 
                                         Toggle::make('is_custom')
@@ -470,7 +477,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->dehydrated(true)
                                         ->columnSpan(2),
 
-                                    // 2. USE extraInputAttributes to put class directly ON THE INPUT
                                     TextInput::make('qty')
                                         ->label(__('orders.qty'))
                                         ->numeric()
@@ -496,7 +502,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->numeric()
                                         ->readOnly()
                                         ->default(0)
-                                        ->dehydrated(true)
+                                        ->dehydrated()
                                         ->extraInputAttributes(['class' => 'js-line-total'])
                                         ->columnSpan(3),
 
@@ -519,7 +525,7 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->columnSpan(12),
 
                                     TextInput::make('base_unit_usd')->hidden()->dehydrated(false),
-                                    TextInput::make('row_index')->hidden()->dehydrated(false),
+                                    // Removed 'row_index' hidden input as it is no longer needed
                                 ]),
                         ]),
                     
@@ -573,6 +579,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->readOnly()
                                 ->default(0)
+                                ->dehydrated()
                                 ->extraInputAttributes(['class' => 'js-subtotal'])
                                 ->columnSpan(6),
                             
@@ -608,6 +615,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->numeric()
                                 ->readOnly()
                                 ->default(0)
+                                ->dehydrated()
                                 ->extraInputAttributes(['class' => 'js-total'])
                                 ->columnSpan(12),
 
@@ -634,8 +642,7 @@ class OrderResource extends \Filament\Resources\Resource
         ]);
     }
 
-    // ... (Helper functions remain unchanged: generateItemExtrasHtml, recomputeLineAndTotals, recomputeTotals, table, productThumbUrl) ...
-
+    // ... (Helper functions remain unchanged) ...
     public static function generateItemExtrasHtml(int $productId, int $branchId, int $customerId): string
     {
         if ($productId <= 0) return '';

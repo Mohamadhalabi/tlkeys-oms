@@ -17,7 +17,9 @@ class EditOrder extends EditRecord
 
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
-        unset($data['items']);
+        if (array_key_exists('items', $data)) {
+            unset($data['items']);
+        }
         $data = $this->normalizeOrderNumbers($data);
         $record->update($data);
         $this->applyWalletSideEffects($record->refresh());
@@ -44,7 +46,7 @@ class EditOrder extends EditRecord
             $data['paid_amount'] = max(0, min((float)$data['paid_amount'], (float)$data['total']));
             if (($data['payment_status'] ?? 'unpaid') === 'paid') {
                 $data['paid_amount'] = (float) $data['total'];
-            } elseif ($data['payment_status'] === 'unpaid') {
+            } elseif (($data['payment_status'] ?? 'unpaid') === 'unpaid') {
                 $data['paid_amount'] = 0.0;
             } else {
                 if ($data['paid_amount'] <= 0 || $data['paid_amount'] >= (float)$data['total']) {
@@ -175,10 +177,16 @@ class EditOrder extends EditRecord
             $data['seller_id'] = auth()->id();
         }
 
+        // FIX: If 'items' is not present (partial update), return data immediately
+        // so we don't accidentally set totals to 0.
+        if (!isset($data['items']) || !is_array($data['items'])) {
+            return $data;
+        }
+
         // -----------------------------------------------------------------
-        // FORCE SERVER-SIDE RECALCULATION BEFORE SAVE
+        // FORCE SERVER-SIDE RECALCULATION
         // -----------------------------------------------------------------
-        $items = $data['items'] ?? [];
+        $items = $data['items'];
         $subtotal = 0;
         
         foreach ($items as $key => $row) {
