@@ -255,14 +255,28 @@ class OrderResource extends \Filament\Resources\Resource
                                         $currentItems = $get('items') ?? [];
                                         $currentItems = array_values(is_array($currentItems) ? $currentItems : []);
 
+                                        // Collect existing product IDs to prevent duplicates
+                                        $existingIds = collect($currentItems)
+                                            ->pluck('product_id')
+                                            ->filter()
+                                            ->map(fn($id) => (int)$id)
+                                            ->toArray();
+
                                         foreach ($skus as $sku) {
                                             $p = $products->get($sku);
                                             if (!$p) continue;
 
+                                            // DUPLICATE CHECK
+                                            if (in_array($p->id, $existingIds)) {
+                                                continue; 
+                                            }
+
+                                            // Add to tracker so we don't add the same item twice in one bulk import
+                                            $existingIds[] = $p->id; 
+
                                             $base = (float) ($p->sale_price ?? $p->price ?? 0);
                                             
                                             $currentItems[] = [
-                                                // 'row_index' => Removed (handled by CSS now)
                                                 'is_custom'     => false,
                                                 'product_id'    => $p->id,
                                                 'product_name'  => $p->title,
@@ -278,7 +292,7 @@ class OrderResource extends \Filament\Resources\Resource
 
                                         $set('items', $currentItems);
                                         static::recomputeTotals($get, $set, true);
-                                        Notification::make()->title('Items added successfully')->success()->send();
+                                        Notification::make()->title('Items added successfully (Duplicates skipped)')->success()->send();
                                     }),
 
                                 Action::make('add_item_top')
@@ -300,7 +314,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         }
 
                                         array_unshift($items, [
-                                            // 'row_index' => Removed (handled by CSS now)
                                             'is_custom'     => false,
                                             'product_id'    => null,
                                             'product_name'  => null,
@@ -324,7 +337,7 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->defaultItems(0)
                                 ->columns(12)
                                 ->addActionLabel('')
-                                ->extraAttributes(['class' => 'order-repeater']) // <--- CSS CLASS ADDED
+                                ->extraAttributes(['class' => 'order-repeater'])
                                 ->mutateRelationshipDataBeforeFillUsing(function (array $data): array {
                                     $pid = $data['product_id'] ?? null;
                                     $data['is_custom'] = empty($pid);
@@ -363,10 +376,8 @@ class OrderResource extends \Filament\Resources\Resource
                                 ->schema([
                                     Grid::make(12)->schema([
                                         
-                                        // 3. UPDATED INDEX COLUMN
                                         Placeholder::make('row_index_disp')
                                             ->label('#')
-                                            // This span will automatically get the number via CSS
                                             ->content(new HtmlString('<span class="row-index-marker" style="font-weight:600; color:#6b7280; font-size:1.1em;"></span>'))
                                             ->extraAttributes(['style' => 'padding-top:5px'])
                                             ->columnSpan(1),
@@ -407,6 +418,10 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->preload(false) 
                                         ->visible(fn ($get) => ! $get('is_custom'))
                                         ->required(fn ($get) => ! $get('is_custom'))
+                                        ->distinct() // Add standard validation
+                                        ->validationMessages([
+                                            'distinct' => 'This product is already in the cart.',
+                                        ])
                                         ->getSearchResultsUsing(function (string $search) {
                                             $search = trim($search);
                                             $limit  = 20;
@@ -439,6 +454,37 @@ class OrderResource extends \Filament\Resources\Resource
                                                 $set('product_id', null); 
                                                 return;
                                             }
+
+                                            // --- DUPLICATE CHECK START ---
+                                            $allItems = $get('../../items') ?? [];
+                                            // Count how many times this product ID appears in the repeater
+                                            // Since live updates happen instantly, the current row already contains this ID
+                                            $dupeCount = 0;
+                                            foreach ($allItems as $item) {
+                                                if (isset($item['product_id']) && $item['product_id'] == $state) {
+                                                    $dupeCount++;
+                                                }
+                                            }
+                                            
+                                            // If found more than once (once is the current selection), it's a duplicate
+                                            if ($dupeCount > 1) {
+                                                Notification::make()
+                                                    ->title('This product is already in the cart')
+                                                    ->warning()
+                                                    ->duration(3000)
+                                                    ->send();
+                                                
+                                                // Reset fields
+                                                $set('product_id', null);
+                                                $set('product_name', null);
+                                                $set('sku', null);
+                                                $set('thumb', null);
+                                                $set('unit_price', 0);
+                                                $set('base_unit_usd', 0);
+                                                $set('line_total', 0);
+                                                return; // Stop execution
+                                            }
+                                            // --- DUPLICATE CHECK END ---
 
                                             $p = Product::find($state);
 
@@ -525,7 +571,6 @@ class OrderResource extends \Filament\Resources\Resource
                                         ->columnSpan(12),
 
                                     TextInput::make('base_unit_usd')->hidden()->dehydrated(false),
-                                    // Removed 'row_index' hidden input as it is no longer needed
                                 ]),
                         ]),
                     
@@ -642,7 +687,6 @@ class OrderResource extends \Filament\Resources\Resource
         ]);
     }
 
-    // ... (Helper functions remain unchanged) ...
     public static function generateItemExtrasHtml(int $productId, int $branchId, int $customerId): string
     {
         if ($productId <= 0) return '';
